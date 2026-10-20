@@ -85,6 +85,14 @@ Merge this into your chosen `debate.config.json` (project `.opencode/` or global
 
 Provide `OPENROUTER_API_KEY` through the environment of the process that starts the OpenCode server, then restart OpenCode/OpenChamber. A terminal export only applies when that terminal launches the server; it does not update an already running desktop app. For another compatible provider, change the API base URL, model IDs, and environment-variable name. Base URLs must be HTTP(S) without embedded credentials, query parameters, or fragments. The adapter appends `/chat/completions`; do not supply the full completion endpoint. Missing keys produce a logged error before any HTTP request.
 
+For OpenChamber desktop, add the key in **Settings → General → Environment variables** as `OPENROUTER_API_KEY`, then restart OpenCode. Alternatively, quit OpenChamber and run this helper in your own terminal:
+
+```sh
+python3 ~/dev/opencode-debate/scripts/set-openrouter-key.py
+```
+
+The helper previews the target change, asks for the key with hidden input, and merges it into OpenChamber's `environment.json` with mode `0600`, preserving other variables and project settings. It honors `OPENCHAMBER_DATA_DIR`. It never accepts the key as a command argument or prints it. Reopen OpenChamber afterward so its managed OpenCode server inherits the saved variable.
+
 Run `/debate ...` normally after configuration. Selecting this backend sends the question/context and each debater's conversation directly to the configured endpoint and can incur provider charges. There is no automatic paid fallback: an OpenCode model failure never switches backend. Set `backend` back to `opencode` to return to the free-session transport. No credentials are placed in JSON or logged by the adapter.
 
 The fallback sends non-streaming text chat requests with the same system prompt from `src/prompts.ts`, without tool definitions. It retains each model's completed text turns in memory and lets the core own retries, parsing, convergence, and deadlines. Failed requests are not appended to history; valid HTTP replies with malformed debate JSON are retained for the one repair turn. Final text is separate from `reasoning`/`reasoning_content`; when only `reasoning_details` is available, that array is serialized into the reasoning log field. Reasoning is never replayed or relayed. No OpenCode reasoning variant is translated into an endpoint-specific parameter.
