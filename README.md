@@ -2,7 +2,7 @@
 
 An OpenCode **2.0.32** plugin for debates between GLM 5.3 Flash Free and DeepSeek V4.1 Flash Free, usable from OpenChamber. TypeScript assigns the roles, alternates criticism and revision, validates JSON, tracks points, retries calls, enforces deadlines, and decides when to stop. No model orchestrates the loop.
 
-**Current status:** Installed and tested through Phase 3 on OpenCode 2.0.32. The 40 automated tests pass; OpenChamber child-session display, timeout handling, and UI cancellation are verified. **Real debates are currently blocked:** free-model requests from the required tool-free agent receive `FreeTierError` inside OpenCode. This matches [upstream issue #51241](https://github.com/anomalyco/opencode/issues/51241). Neither real-model convergence nor a contested debate was achieved. See the [integration report](docs/INTEGRATION.md), [phase reports](docs/PHASES.md), [API findings](docs/FINDINGS.md), and [specification](docs/SPEC.md). Phase 4's paid fallback remains unimplemented, awaiting approval.
+**Current status:** All four implementation phases are committed separately. The OpenAI-compatible fallback is implemented and tested against a local mock server; no paid inference has been performed. The 57 automated tests pass. OpenChamber child-session display, timeout handling, and UI cancellation were verified with the OpenCode backend. **Free-model debates remain blocked** by `FreeTierError` from the required tool-free agent inside OpenCode, matching [upstream issue #51241](https://github.com/anomalyco/opencode/issues/51241). Real-model agreement is still unverified. The default backend remains `opencode`; select the fallback explicitly as described below. See the [integration report](docs/INTEGRATION.md), [phase reports](docs/PHASES.md), [API findings](docs/FINDINGS.md), and [specification](docs/SPEC.md).
 
 ## Install and uninstall
 
@@ -38,7 +38,7 @@ To remove only those links, preview their paths and approve the removal first, t
 
 You can also explicitly ask the current agent to “debate this” or “use debate.” The command expands into a request to call the tool; the calling model performs that initial invocation. The tool description prohibits unsolicited calls. It is an instruction to the calling model, not a perfect deterministic classifier of natural-language consent. Child debaters cannot invoke any tools.
 
-The tool takes `question`, optional `context`, `max_rounds` (1–8), `first` (`glm`, `deepseek`, or `random`), and `include_transcript` (default false). Random assignment uses Node/Bun crypto; explicit `first` chooses the Proposer. The two sessions retain separate histories, live under the calling session via `parentID`, and are titled `debate: <slug> | GLM/DeepSeek (proposer/challenger)`.
+The tool takes `question`, optional `context`, `max_rounds` (1–8), `first` (`glm`, `deepseek`, or `random`), and `include_transcript` (default false). Random assignment uses Node/Bun crypto; explicit `first` chooses the Proposer. With the OpenCode backend, the two sessions retain separate histories, live under the calling session via `parentID`, and are titled `debate: <slug> | GLM/DeepSeek (proposer/challenger)`. The fallback instead keeps two separate conversations in memory; it creates no OpenCode child sessions. Read its full transcript in the JSON log or set `include_transcript: true`.
 
 Normal completion always ends on the Challenger's review. `converged` means the Challenger endorses the latest answer and no points remain open. `stalemate` means consecutive Challenger turns have identical open-ID sets, starting at C2. `max_rounds` means the review budget was exhausted. The result starts with the latest valid Proposer answer, then unresolved points with both positions, the reason, log path, and child-session IDs. Errors and cancellation preserve collected work. An error before any valid proposal reports that no answer was gathered. OpenChamber's Stop action also aborts the parent step, so the UI shows “Step interrupted” instead of the returned cancellation Markdown; read the JSON log for the partial result.
 
@@ -53,16 +53,44 @@ Start from `debate.config.example.json`. Copying a configuration outside the rep
 | `backend` | `opencode` |
 | `models.glm` | `{ "providerID": "opencode", "modelID": "glm-5.3-flash-free" }` |
 | `models.deepseek` | `{ "providerID": "opencode", "modelID": "deepseek-v4.1-flash-free" }` |
-| `models.<debater>.variant` | Omitted; the installed inventory supports `low`, `high`, `max` |
+| `models.<debater>.variant` | OpenCode backend only; omitted; installed inventory supports `low`, `high`, `max` |
 | `defaultMaxRounds` | 4 |
 | `callTimeoutMs` | 300000 (5 minutes) |
 | `totalTimeoutMs` | 1800000 (30 minutes) |
 | `logDir` | `~/.local/share/opencode-debate/debates` (`XDG_DATA_HOME` is honored) |
-| `openaiCompatible` | Reserved Phase 4 settings shown in the example |
+| `openaiCompatible.baseURL` | `https://openrouter.ai/api/v1` (API base; `/chat/completions` is appended) |
+| `openaiCompatible.apiKeyEnv` | `OPENROUTER_API_KEY` (environment variable name, never the key itself) |
+| `openaiCompatible.models.glm` | `z-ai/glm-5.3-flash` |
+| `openaiCompatible.models.deepseek` | `deepseek/deepseek-v4.1-flash` |
 
-Environment overrides: `OPENCODE_DEBATE_BACKEND`, `OPENCODE_DEBATE_LOG_DIR`, `OPENCODE_DEBATE_MAX_ROUNDS`, `OPENCODE_DEBATE_CALL_TIMEOUT_MS`, `OPENCODE_DEBATE_TOTAL_TIMEOUT_MS`, and `OPENCODE_DEBATE_GLM_PROVIDER_ID`, `OPENCODE_DEBATE_GLM_MODEL_ID`, `OPENCODE_DEBATE_GLM_VARIANT` (equivalent `DEEPSEEK` fields are supported). `OPENCODE_DEBATE_BASE_URL` sets the reserved fallback endpoint. Set these in the environment of the **OpenCode server**, then restart it; exporting them in an unrelated terminal does not change a running server.
+Environment overrides: `OPENCODE_DEBATE_BACKEND`, `OPENCODE_DEBATE_LOG_DIR`, `OPENCODE_DEBATE_MAX_ROUNDS`, `OPENCODE_DEBATE_CALL_TIMEOUT_MS`, `OPENCODE_DEBATE_TOTAL_TIMEOUT_MS`, and `OPENCODE_DEBATE_GLM_PROVIDER_ID`, `OPENCODE_DEBATE_GLM_MODEL_ID`, `OPENCODE_DEBATE_GLM_VARIANT` (equivalent `DEEPSEEK` fields are supported). `OPENCODE_DEBATE_BASE_URL` sets the fallback endpoint. Fallback-only overrides are `OPENCODE_DEBATE_FALLBACK_API_KEY_ENV`, `OPENCODE_DEBATE_FALLBACK_GLM_MODEL_ID`, and `OPENCODE_DEBATE_FALLBACK_DEEPSEEK_MODEL_ID`; the existing `GLM/DEEPSEEK_MODEL_ID` fields affect only the OpenCode backend. Set these in the environment of the **OpenCode server**, then restart it; exporting them in an unrelated terminal does not change a running server.
 
-The fallback configuration will use `backend: "openai-compatible"`, default endpoint `https://openrouter.ai/api/v1`, models `z-ai/glm-5.3-flash` and `deepseek/deepseek-v4.1-flash`, and `OPENROUTER_API_KEY`. Until Phase 4 is implemented, selecting it returns a clear logged error. There is no automatic paid fallback. Do not put an API key in JSON or commit it.
+## Switching to the fallback
+
+Merge this into your chosen `debate.config.json` (project `.opencode/` or global location above), after approving any change outside the repository:
+
+```json
+{
+  "backend": "openai-compatible",
+  "openaiCompatible": {
+    "baseURL": "https://openrouter.ai/api/v1",
+    "apiKeyEnv": "OPENROUTER_API_KEY",
+    "models": {
+      "glm": "z-ai/glm-5.3-flash",
+      "deepseek": "deepseek/deepseek-v4.1-flash"
+    }
+  }
+}
+```
+
+Provide `OPENROUTER_API_KEY` through the environment of the process that starts the OpenCode server, then restart OpenCode/OpenChamber. A terminal export only applies when that terminal launches the server; it does not update an already running desktop app. For another compatible provider, change the API base URL, model IDs, and environment-variable name. Base URLs must be HTTP(S) without embedded credentials, query parameters, or fragments. The adapter appends `/chat/completions`; do not supply the full completion endpoint. Missing keys produce a logged error before any HTTP request.
+
+Run `/debate ...` normally after configuration. Selecting this backend sends the question/context and each debater's conversation directly to the configured endpoint and can incur provider charges. There is no automatic paid fallback: an OpenCode model failure never switches backend. Set `backend` back to `opencode` to return to the free-session transport. No credentials are placed in JSON or logged by the adapter.
+
+The fallback sends non-streaming text chat requests with the same system prompt from `src/prompts.ts`, without tool definitions. It retains each model's completed text turns in memory and lets the core own retries, parsing, convergence, and deadlines. Failed requests are not appended to history; valid HTTP replies with malformed debate JSON are retained for the one repair turn. Final text is separate from `reasoning`/`reasoning_content`; when only `reasoning_details` is available, that array is serialized into the reasoning log field. Reasoning is never replayed or relayed. No OpenCode reasoning variant is translated into an endpoint-specific parameter.
+
+Cancellation/deadlines abort active fetches and discard late replies. Disconnecting cannot guarantee that a remote provider stops computing or billing. The mock tests establish local transport behavior, not production model quality, availability, or provider billing behavior. Endpoints that require reasoning blocks replayed into history, streaming-only responses, tool calls, or non-text content are unsupported. Truncated/refused/tool-call responses fail clearly. HTTP 429 and equivalent error envelopes feed bounded engine backoff with `Retry-After`; other HTTP failures stop immediately. Provider error bodies are omitted from logs/results to avoid echoing secrets.
+
 
 ## Logs and prompt tuning
 
@@ -70,14 +98,14 @@ Every run checkpoints a JSON file named `<ISO timestamp>-<question-slug>-<run-su
 
 Logs intentionally contain the full question, context, model text, and available reasoning. Opponents receive only final text parts; reasoning is never relayed. Logs are not committed, and there is no automatic retention/deletion policy.
 
-Tune all model/agent instructions and repair prompts in `src/prompts.ts`. The command template also lives there; after changing it, run `npm run generate-command` to update the linked Markdown file. Logic lives in `src/core/`; the v2 transport is `src/adapters/opencode.ts`.
+Tune all model/agent instructions and repair prompts in `src/prompts.ts`. The command template also lives there; after changing it, run `npm run generate-command` to update the linked Markdown file. Logic lives in `src/core/`; the v2 transport is `src/adapters/opencode.ts`, and the fallback transport is `src/adapters/openai-compatible.ts`.
 
 ## Limits and diagnostics
 
-The free models are limited-time offers and require OpenCode. In this installation, using OpenCode is insufficient when all debater tools are disabled: the gateway returns `provider.auth` / `FreeTierError` before producing a proposal. The plugin retains the specified deny-all permissions and removes all tool declarations. There is no permission workaround or automatic paid substitution. A compatible upstream fix or an approved Phase 4 fallback is needed to run these debates. Free GLM can be slow. Model availability is checked before creating children; missing models fail with a configuration pointer. Two models agreeing does not establish correctness. The open-ID stalemate rule can stop a debate even when their arguments have become more detailed. Debaters have no tools, browsing, or independent fact verification. Treat relayed context as debate material rather than trusted instructions.
+The free models are limited-time offers and require OpenCode. In this installation, using OpenCode is insufficient when all debater tools are disabled: the gateway returns `provider.auth` / `FreeTierError` before producing a proposal. The plugin retains the specified deny-all permissions and removes all tool declarations. There is no permission workaround or automatic paid substitution. Use an upstream fix when available or explicitly select the implemented fallback to run these debates. Free GLM can be slow. OpenCode model availability is checked before creating children; missing models fail with a configuration pointer. Two models agreeing does not establish correctness. The open-ID stalemate rule can stop a debate even when their arguments have become more detailed. Debaters have no tools, browsing, or independent fact verification. Treat relayed context as debate material rather than trusted instructions.
 
 The v2.0.32 Promise plugin adapter ignores request-option abort signals. This plugin races its own signals, explicitly interrupts children, and prevents a late-admitted prompt from overlapping a retry. Child sessions are retained on error/cancellation for inspection. If the server itself is unreachable, interrupt acknowledgment can fail; the log records that diagnostic. A process kill, machine failure, or unwritable disk cannot guarantee a final cancellation log.
 
 V2 uses `session.prompt({ sessionID, text })`, then wait/context reads; it does not return an answer from prompt admission. Some wait endpoints are experimental. The implementation targets the pinned release and needs testing before upgrades. See `docs/FINDINGS.md` for source-level evidence and known historical hanging-prompt issues.
 
-Development checks: `npm run check` runs typechecking and the scripted core, mocked v2 transport, plugin registration, configuration, and private-log tests. `npm run install:preview` performs no installation. The [integration report](docs/INTEGRATION.md) distinguishes actual provider failures from passing tests with an injected pre-dispatch delay. In OpenChamber, inspect children through the calling session's **Subagents** panel; that parent-child relationship was verified. No deadlock occurred in the exercised failure, timeout, or cancellation paths; successful multi-round provider execution remains unverified.
+Development checks: `npm run check` runs typechecking and the scripted core, mocked v2 transport, local HTTP fallback integration, plugin registration, configuration, and private-log tests. `npm run install:preview` performs no installation. The [integration report](docs/INTEGRATION.md) distinguishes actual provider failures from passing tests with an injected pre-dispatch delay. In OpenChamber, inspect children through the calling session's **Subagents** panel; that parent-child relationship was verified. No deadlock occurred in the exercised failure, timeout, or cancellation paths; successful multi-round provider execution remains unverified.

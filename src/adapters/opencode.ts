@@ -3,25 +3,20 @@ import type { SessionStructuredError } from "@opencode/client";
 import { abortable, abortReason } from "../core/debate.ts";
 import { DebateError, type Debater, type DebateResult } from "../core/types.ts";
 import type { DebateConfig } from "../config.ts";
+import type { DebateAdapter, SessionDetail, SessionInterruption } from "./types.ts";
+export { retryAfterMs } from "./http.ts";
+export type { SessionDetail } from "./types.ts";
 export type OpenCodeClient = Pick<Plugin.Context, "session" | "model">;
 export const AGENT_ID = "debater";
 export const MODEL_NAMES: Record<Debater, string> = { glm: "GLM", deepseek: "DeepSeek" };
 export const NO_TOOLS = [{ action: "*", resource: "*", effect: "deny" as const }];
-export interface SessionDetail { debater: Debater; id: string; title: string; model: DebateConfig["models"][Debater]; role: "proposer" | "challenger" }
-export function retryAfterMs(value: string | null, now = Date.now()): number | undefined {
-  if (!value) return;
-  const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
-  const date = Date.parse(value);
-  if (Number.isFinite(date)) return Math.max(0, date - now);
-}
 export function providerError(error: SessionStructuredError, retryAfter?: number): DebateError {
   return new DebateError(error.status === 429 || /rate.?limit|too many requests/i.test(error.type) ? "rate_limit" : "transport", `${error.type}: ${error.message}`, retryAfter);
 }
-export class OpenCodeAdapter {
+export class OpenCodeAdapter implements DebateAdapter {
   readonly sessions: SessionDetail[] = [];
   readonly diagnostics: string[] = [];
-  readonly interruptions: { sessionID: string; requestedAt: number; acknowledgedAt?: number; interrupted?: boolean; error?: string }[] = [];
+  readonly interruptions: SessionInterruption[] = [];
   private initialization?: Promise<void>;
   private assignment?: DebateResult["assignment"];
   private closed = false;
@@ -35,7 +30,7 @@ export class OpenCodeAdapter {
     for (const debater of ["glm", "deepseek"] as const) {
       const configured = this.config.models[debater];
       const available = models.find(m => m.providerID === configured.providerID && m.id === configured.modelID && m.enabled && m.status !== "deprecated");
-      if (!available) throw new DebateError("transport", `Model ${configured.providerID}/${configured.modelID} is unavailable. Configure backend: "openai-compatible" in .opencode/debate.config.json for the fallback (Phase 4).`);
+      if (!available) throw new DebateError("transport", `Model ${configured.providerID}/${configured.modelID} is unavailable. Configure backend: "openai-compatible" in .opencode/debate.config.json for the fallback.`);
       if (configured.variant && !available.variants.some(v => v.id === configured.variant)) throw new DebateError("transport", `Variant ${configured.variant} is unavailable for ${configured.modelID}`);
     }
     for (const debater of ["glm", "deepseek"] as const) {

@@ -11,7 +11,13 @@ export const configSchema = z.object({
   totalTimeoutMs: z.number().int().min(1).max(2_147_483_647),
   logDir: z.string().min(1),
   openaiCompatible: z.object({
-    baseURL: z.url(), apiKeyEnv: z.string().min(1),
+    baseURL: z.url().refine(value => {
+      try {
+        const url = new URL(value);
+        return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash;
+      } catch { return false; }
+    }, "Use an HTTP(S) API base URL without credentials, query, or fragment"),
+    apiKeyEnv: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
     models: z.object({ glm: z.string().min(1), deepseek: z.string().min(1) }).strict(),
   }).strict(),
 }).strict();
@@ -63,7 +69,14 @@ export async function loadConfig(directory: string, projectRoot = directory, env
     }
     if (Object.keys(patch).length) overrides.models = { ...(overrides.models as object), [debater]: patch };
   }
-  if (env.OPENCODE_DEBATE_BASE_URL) overrides.openaiCompatible = { baseURL: env.OPENCODE_DEBATE_BASE_URL };
+  const fallback: Record<string, unknown> = {};
+  if (env.OPENCODE_DEBATE_BASE_URL) fallback.baseURL = env.OPENCODE_DEBATE_BASE_URL;
+  if (env.OPENCODE_DEBATE_FALLBACK_API_KEY_ENV) fallback.apiKeyEnv = env.OPENCODE_DEBATE_FALLBACK_API_KEY_ENV;
+  for (const debater of ["glm", "deepseek"] as const) {
+    const value = env[`OPENCODE_DEBATE_FALLBACK_${debater.toUpperCase()}_MODEL_ID`];
+    if (value) fallback.models = { ...(fallback.models as object), [debater]: value };
+  }
+  if (Object.keys(fallback).length) overrides.openaiCompatible = fallback;
   const result = configSchema.parse(merge(config, overrides));
   result.logDir = result.logDir.startsWith("~/") ? path.join(homedir(), result.logDir.slice(2)) : path.resolve(directory, result.logDir);
   return result;

@@ -5,6 +5,8 @@ import { runDebate } from "./core/debate.ts";
 import type { Turn } from "./core/types.ts";
 import { DEBATER_SYSTEM, TOOL_DESCRIPTION } from "./prompts.ts";
 import { OpenCodeAdapter, AGENT_ID, MODEL_NAMES, NO_TOOLS, retryAfterMs } from "./adapters/opencode.ts";
+import { OpenAICompatibleAdapter } from "./adapters/openai-compatible.ts";
+import type { DebateAdapter } from "./adapters/types.ts";
 import { DebateLog } from "./log.ts";
 import { renderResult } from "./render.ts";
 
@@ -25,7 +27,9 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
     opencodeVersion: ctx.app.version, parentSessionID: execution.sessionID, turns: [], pointHistory: [], sessions: [] });
   try { await journal.initialize(); }
   catch (error) { return `## Debate result: error\n### Final answer\nNo answer was gathered.\n### Details\nCannot create the required debate log at ${journal.path}: ${error instanceof Error ? error.message : String(error)}`; }
-  const adapter = new OpenCodeAdapter(ctx, config, execution.sessionID, journal.slug, owned, retryHints);
+  const adapter: DebateAdapter = config.backend === "opencode"
+    ? new OpenCodeAdapter(ctx, config, execution.sessionID, journal.slug, owned, retryHints)
+    : new OpenAICompatibleAdapter(config);
   const turns: Turn[] = []; const pendingWrites: Promise<unknown>[] = [];
   const progress = (message: string) => {
     const task = Promise.race([execution.progress({ title: "Debate", description: message, status: message }), new Promise<void>(resolve => { const timer = setTimeout(resolve, 1000); timer.unref(); })]).catch(() => {});
@@ -42,7 +46,6 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
       callModel: async (...params) => {
         if (configurationError) throw configurationError;
         if (execution.agent === AGENT_ID) throw new Error("A debater cannot invoke the debate tool");
-        if (config.backend !== "opencode") throw new Error("The openai-compatible fallback is scheduled for Phase 4 and is not implemented yet. Select backend: opencode.");
         return adapter.callModel(...params);
       },
       onEvent(event) {
