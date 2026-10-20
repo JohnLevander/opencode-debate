@@ -268,3 +268,10 @@ The request ended at `first: "glm" |`, so the remaining architecture and any lat
 ## Phase 0 completion boundary
 
 Only this findings document and a minimal secret/dependency/log ignore file belong in the Phase 0 commit. No plugin code, global configuration edits, agent/command installation, service restarts, or model inference have occurred. Next step is the user's review, remaining architecture requirements, and explicit OK to begin implementation.
+
+
+## Phase 3 addendum — observed on 2026-10-20
+
+The Phase 0 inventory/source findings did not guarantee free-tier inference. Live OpenChamber tests now show that both configured free models reject the tool-free debater with `provider.auth` / `FreeTierError` inside OpenCode. [Upstream issue #51241](https://github.com/anomalyco/opencode/issues/51241) reports matching behavior with denied read/shell permissions. Its gateway-side cause remains outside this plugin's control. Keeping native OpenCode system context did not fix it. The required deny-all/no-tools behavior is retained. See [integration evidence](INTEGRATION.md); real convergence and contested point histories remain unverified.
+
+The installed server can normalize an omitted reasoning variant to `"default"`; adapter matching treats those as equivalent. Explicit variants still require inventory support and exact matching. OpenChamber displays retained child sessions under the parent session's Subagents panel. A real UI Stop finalized a cancelled log and acknowledged interrupts for both children; the active child was stopped and the other was already idle. The UI displays Step interrupted because the parent step is cancelled too. Injected pre-dispatch delay tests verified deadlines and cancellation without a hanging parent. They do not prove remote-stream cancellation or successful multi-round provider execution.

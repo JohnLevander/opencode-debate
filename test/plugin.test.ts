@@ -21,8 +21,8 @@ test("v2 tool registration preserves exact description and hides/isolates debate
   assert.equal(tool.description, TOOL_DESCRIPTION); assert.equal(tool.name, "debate");
   assert.equal(agent.hidden, true); assert.equal(agent.mode, "subagent"); assert.equal(agent.system, DEBATER_SYSTEM);
   assert.deepEqual(agent.permissions, [{ action: "*", resource: "*", effect: "deny" }]);
-  const event = { agent: "debater", sessionID: "child", tools: { debate: {}, shell: {}, mcp_custom: {} }, system: [] as { type: string; text: string }[] };
-  hooks.context(event); assert.deepEqual(event.tools, {}); assert.equal(event.system[0].text, DEBATER_SYSTEM);
+  const event = { agent: "debater", sessionID: "child", tools: { debate: {}, shell: {}, mcp_custom: {} }, system: [{ type: "text", text: "Host harness instructions" }] as { type: string; text: string }[] };
+  hooks.context(event); assert.deepEqual(event.tools, {}); assert.equal(event.system[0].text, "Host harness instructions"); assert.equal(event.system.length, 1);
   const parent = { ...event, agent: "build", tools: { shell: {} } }; hooks.context(parent); assert.deepEqual(parent.tools, { shell: {} });
   const retry = { agent: "debater", decision: { retry: true } }; hooks.retry(retry); assert.deepEqual(retry.decision, { retry: false });
   assert.ok(debateArgs.safeParse({ question: "Question", max_rounds: 8 }).success);
@@ -91,6 +91,6 @@ for (const scenario of ["converged", "cancelled", "timeout"] as const) {
     if (scenario === "converged") {
       assert.equal(log.turns[0].reasoning, "secret reasoning"); assert.ok(!fake.prompts[1].text.includes("secret reasoning"));
       assert.match(output, /### Transcript/); assert.equal(log.answer, "A valid final answer");
-    } else { assert.ok(fake.interrupts.includes("child-0")); assert.ok(fake.interrupts.includes("child-1")); }
+    } else { assert.ok(fake.interrupts.includes("child-0")); assert.ok(fake.interrupts.includes("child-1")); assert.ok(log.interruptions.some((entry: any) => entry.sessionID === "child-0" && entry.acknowledgedAt)); assert.ok(log.interruptions.some((entry: any) => entry.sessionID === "child-1" && entry.acknowledgedAt)); }
   });
 }

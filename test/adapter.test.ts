@@ -87,3 +87,9 @@ test("Retry-After accepts seconds and dates but ignores invalid values", async (
   assert.equal(retryAfterMs("Thu, 01 Jan 1970 00:00:02 GMT", 1000), 1000);
   assert.equal(retryAfterMs("nonsense"), undefined);
 });
+
+test("server-normalized default variant matches an omitted configured variant", async () => {
+  const { adapter, change } = setup(); change({ normalizeDefaultVariant: true });
+  const reply = await adapter.callModel("glm", "test", new AbortController().signal);
+  assert.match(reply.text, /reply 1/);
+});

@@ -6,6 +6,7 @@ export function fakeClient() {
   const messages = new Map<string, any[]>();
   let finish = "stop", onlyReasoning = false, outcome = "succeeded", modelChanged = false;
   let assistantError: any;
+  let normalizeDefaultVariant = false;
   let onPrompt: ((input: any) => Promise<void> | void) | undefined;
   let onWait: ((input: any) => Promise<void> | void) | undefined;
   const client = {
@@ -18,7 +19,7 @@ export function fakeClient() {
         prompts.push(input); await onPrompt?.(input);
         const id = `input-${++sequence}`; const child = created.find(s => s.id === input.sessionID)!;
         messages.get(child.id)!.push({ type: "user", id, text: input.text }, { type: "assistant", id: `assistant-${sequence}`, time: { completed: 100 }, finish,
-          agent: "debater", model: { ...child.model, ...(modelChanged ? { id: "changed" } : {}) }, error: assistantError,
+          agent: "debater", model: { ...child.model, ...(normalizeDefaultVariant ? { variant: child.model.variant ?? "default" } : {}), ...(modelChanged ? { id: "changed" } : {}) }, error: assistantError,
           content: [...(onlyReasoning ? [] : [{ type: "text", text: `reply ${sequence}` }, { type: "text", text: "final text" }]), { type: "reasoning", text: "secret reasoning" }],
         });
         return { id };
@@ -28,7 +29,8 @@ export function fakeClient() {
     },
   };
   return { client: client as unknown as OpenCodeClient, raw: client, created, prompts, interrupts, messages,
-    change: (patch: { finish?: string; onlyReasoning?: boolean; outcome?: string; modelChanged?: boolean; assistantError?: any; onPrompt?: typeof onPrompt; onWait?: typeof onWait }) => {
+    change: (patch: { finish?: string; onlyReasoning?: boolean; outcome?: string; modelChanged?: boolean; assistantError?: any; normalizeDefaultVariant?: boolean; onPrompt?: typeof onPrompt; onWait?: typeof onWait }) => {
+      if (patch.normalizeDefaultVariant !== undefined) normalizeDefaultVariant = patch.normalizeDefaultVariant;
       if (patch.finish !== undefined) finish = patch.finish;
       if (patch.onlyReasoning !== undefined) onlyReasoning = patch.onlyReasoning;
       if (patch.outcome !== undefined) outcome = patch.outcome;

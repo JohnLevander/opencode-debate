@@ -21,6 +21,7 @@ export function providerError(error: SessionStructuredError, retryAfter?: number
 export class OpenCodeAdapter {
   readonly sessions: SessionDetail[] = [];
   readonly diagnostics: string[] = [];
+  readonly interruptions: { sessionID: string; requestedAt: number; acknowledgedAt?: number; interrupted?: boolean; error?: string }[] = [];
   private initialization?: Promise<void>;
   private assignment?: DebateResult["assignment"];
   private closed = false;
@@ -53,9 +54,15 @@ export class OpenCodeAdapter {
   private async interrupt(sessionID: string): Promise<void> {
     // Do not await plugin-local wait() here: its request signal is ignored in 2.0.32.
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const observation: OpenCodeAdapter["interruptions"][number] = { sessionID, requestedAt: Date.now() };
+    this.interruptions.push(observation);
     try {
-      await Promise.race([this.ctx.session.interrupt({ sessionID, resume: false }), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Interrupt acknowledgement timed out")), 3000); })]);
-    } catch (error) { this.diagnostics.push(`${sessionID}: ${error instanceof Error ? error.message : String(error)}`); }
+      const acknowledgement = await Promise.race([this.ctx.session.interrupt({ sessionID, resume: false }), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Interrupt acknowledgement timed out")), 3000); })]);
+      observation.acknowledgedAt = Date.now(); observation.interrupted = acknowledgement.interrupted;
+    } catch (error) {
+      observation.error = error instanceof Error ? error.message : String(error);
+      this.diagnostics.push(`${sessionID}: ${observation.error}`);
+    }
     finally { clearTimeout(timer); }
   }
   async cancelAll(): Promise<void> {
@@ -106,7 +113,7 @@ export class OpenCodeAdapter {
       if (idle?.error) throw providerError(idle.error, this.retryHints.get(child.id));
       if (state.outcome === "failed" || state.outcome === "interrupted") throw new DebateError("transport", `Child session ${state.outcome}`);
       if (!assistant || !assistant.time.completed || !assistant.finish || assistant.finish === "tool-calls" || assistant.finish === "length" || assistant.finish === "error" || assistant.finish === "content-filter") throw new DebateError("transport", "Child completed without a final, untruncated assistant answer");
-      if (assistant.agent !== AGENT_ID || assistant.model.id !== child.model.modelID || assistant.model.providerID !== child.model.providerID || assistant.model.variant !== child.model.variant) throw new DebateError("transport", "Child agent or model selection changed during debate");
+      if (assistant.agent !== AGENT_ID || assistant.model.id !== child.model.modelID || assistant.model.providerID !== child.model.providerID || (assistant.model.variant ?? "default") !== (child.model.variant ?? "default")) throw new DebateError("transport", "Child agent or model selection changed during debate");
       const text = assistant.content.filter(p => p.type === "text").map(p => p.text).join("\n\n");
       const reasoning = assistant.content.filter(p => p.type === "reasoning").map(p => p.text).join("\n\n");
       if (!text.trim()) throw new DebateError("transport", "Child returned reasoning but no final text");

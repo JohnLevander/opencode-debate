@@ -59,13 +59,13 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
     if (result.status === "cancelled" || result.status === "error") await adapter.cancelAll();
     await Promise.allSettled(pendingWrites);
     const output = renderResult(result, config, journal.path, adapter.sessions, args.include_transcript);
-    await journal.update({ ...result, config, args, sessions: adapter.sessions, diagnostics: adapter.diagnostics, finalResult: output });
+    await journal.update({ ...result, config, args, sessions: adapter.sessions, diagnostics: adapter.diagnostics, interruptions: adapter.interruptions, finalResult: output });
     progress(`Debate ended: ${result.status}. ${result.rounds} Challenger round(s). Log: ${journal.path}`);
     return output;
   } catch (error) {
     await adapter.cancelAll();
     const reason = error instanceof Error ? error.message : String(error);
-    await journal.update({ status: execution.signal.aborted ? "cancelled" : "error", reason, turns, sessions: adapter.sessions }).catch(() => {});
+    await journal.update({ status: execution.signal.aborted ? "cancelled" : "error", reason, turns, sessions: adapter.sessions, interruptions: adapter.interruptions }).catch(() => {});
     return `## Debate result: ${execution.signal.aborted ? "cancelled" : "error"}\n### Final answer\nSee the partial transcript in the log.\n### Details\nReason: ${reason}\nLog: ${journal.path}`;
   } finally { execution.signal.removeEventListener("abort", cancel); adapter.release(); }
 }
@@ -76,7 +76,7 @@ export default Plugin.define({
     const owned = new Set<string>();
     const retryHints = new Map<string, number>();
     const existing = (await ctx.agent.list()).data.find(a => a.id === AGENT_ID);
-    if (existing && existing.system !== DEBATER_SYSTEM) throw new Error("Agent 'debater' already exists with another definition; rename it before enabling opencode-debate.");
+    if (existing && existing.description !== "Internal structured debate participant") throw new Error("Agent 'debater' already exists with another definition; rename it before enabling opencode-debate.");
     await ctx.agent.transform(editor => editor.update(AGENT_ID, agent => {
       agent.name = Agent.Name.make("debater"); agent.description = "Internal structured debate participant";
       agent.mode = "subagent"; agent.hidden = true; agent.system = DEBATER_SYSTEM;
@@ -85,7 +85,8 @@ export default Plugin.define({
     await ctx.session.hook("context", event => {
       if (event.agent !== AGENT_ID && !owned.has(event.sessionID)) return;
       for (const tool of Object.keys(event.tools)) delete event.tools[tool];
-      event.system = [{ type: "text", text: DEBATER_SYSTEM }];
+      // Preserve the agent prompt and any additional context assembled by OpenCode.
+      // Tool isolation does not require replacing the system-message array.
     });
     await ctx.session.hook("http.response", event => {
       if (event.agent !== AGENT_ID && !owned.has(event.sessionID)) return;
