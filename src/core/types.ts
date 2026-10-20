@@ -13,7 +13,7 @@ export interface Attempt {
 }
 export interface Turn {
   id: string; round: number; debater: Debater; role: Role; message: string;
-  startedAt: number; endedAt: number; attempts: Attempt[]; text?: string; reasoning?: string; parsed?: Reply; error?: string;
+  startedAt: number; endedAt: number; retries: number; attempts: Attempt[]; text?: string; reasoning?: string; parsed?: Reply; error?: string;
 }
 export type DebateStatus = "converged" | "stalemate" | "max_rounds" | "cancelled" | "error";
 export interface DebateResult {

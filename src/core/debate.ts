@@ -33,7 +33,7 @@ const snapshot = (points: Map<string, Point>) => structuredClone([...points.valu
 export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
   const now = opts.now ?? Date.now;
   const startedAt = now();
-  const proposer: Debater = opts.first === "random" ? ((opts.random?.() ?? randomInt(0, 2)) < (opts.random ? 0.5 : 1) ? "glm" : "deepseek") : opts.first;
+  const proposer: Debater = opts.first === "random" ? ((opts.random ? opts.random() < 0.5 : randomInt(0, 2) === 0) ? "glm" : "deepseek") : opts.first;
   const result: DebateResult = {
     question: opts.question, context: opts.context, assignment: { proposer, challenger: proposer === "glm" ? "deepseek" : "glm" },
     status: "error", reason: "Debate did not finish", rounds: 0, answer: null, points: [], pointHistory: [], turns: [], startedAt, endedAt: startedAt,
@@ -55,7 +55,7 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
     for (;;) {
       live();
       const attempt: Turn["attempts"][number] = { message, startedAt: now(), endedAt: now(), kind };
-      turn.attempts.push(attempt);
+      turn.attempts.push(attempt); turn.retries = turn.attempts.length - 1;
       const controller = new AbortController();
       const abort = () => controller.abort(overall.signal.reason);
       overall.signal.addEventListener("abort", abort, { once: true });
@@ -87,14 +87,14 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
       if (limited && ++rateAttempts < 3) {
         const waitMs = Math.max(1000 * 2 ** (rateAttempts - 1), limited.retryAfterMs ?? 0);
         opts.onEvent?.({ type: "retry", turnID: turn.id, reason: "rate_limit", delayMs: waitMs });
-        await delay(waitMs, overall.signal); live(); kind = "rate_limit_retry"; continue;
+        await delay(Math.min(waitMs, Math.max(0, deadline - now())), overall.signal); live(); kind = "rate_limit_retry"; continue;
       }
       throw failure;
     }
   };
   const takeTurn = async (id: string, round: number, role: Role, message: string): Promise<Turn> => {
     live();
-    const turn: Turn = { id, round, role, debater: result.assignment[role], message, startedAt: now(), endedAt: now(), attempts: [] };
+    const turn: Turn = { id, round, role, debater: result.assignment[role], message, startedAt: now(), endedAt: now(), retries: 0, attempts: [] };
     result.turns.push(turn);
     opts.onEvent?.({ type: "turn_start", turn: structuredClone(turn) });
     let repairedJSON = false, repairedMissing = false;

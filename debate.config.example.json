@@ -1,0 +1,16 @@
+{
+  "backend": "opencode",
+  "models": {
+    "glm": { "providerID": "opencode", "modelID": "glm-5.3-flash-free" },
+    "deepseek": { "providerID": "opencode", "modelID": "deepseek-v4.1-flash-free" }
+  },
+  "defaultMaxRounds": 4,
+  "callTimeoutMs": 300000,
+  "totalTimeoutMs": 1800000,
+  "logDir": "~/.local/share/opencode-debate/debates",
+  "openaiCompatible": {
+    "baseURL": "https://openrouter.ai/api/v1",
+    "apiKeyEnv": "OPENROUTER_API_KEY",
+    "models": { "glm": "z-ai/glm-5.3-flash", "deepseek": "deepseek/deepseek-v4.1-flash" }
+  }
+}
