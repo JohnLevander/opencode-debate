@@ -93,3 +93,26 @@ test("server-normalized default variant matches an omitted configured variant", 
   const reply = await adapter.callModel("glm", "test", new AbortController().signal);
   assert.match(reply.text, /reply 1/);
 });
+
+
+test("native free-tier rejection explains the tool-free compatibility blocker without asking for a paid key", async () => {
+  const { adapter, change } = setup();
+  change({ assistantError: { type: "provider.auth", message: "OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building." }, outcome: "failed" });
+  await assert.rejects(adapter.callModel("deepseek", "question", new AbortController().signal), error => {
+    assert.ok(error instanceof DebateError); assert.equal(error.code, "transport");
+    assert.match(error.message, /provider.auth: OpenCode's free tier/);
+    assert.match(error.message, /already ran inside an OpenCode child session/);
+    assert.match(error.message, /all tools disabled/);
+    assert.match(error.message, /does not establish that a paid provider or OpenRouter API key is needed/);
+    assert.match(error.message, /changing tool permissions requires approval/);
+    return true;
+  });
+});
+
+test("other authentication errors keep their original diagnosis", async () => {
+  const { adapter, change } = setup();
+  change({ assistantError: { type: "provider.auth", message: "Expired Console credential", status: 401 }, outcome: "failed" });
+  await assert.rejects(adapter.callModel("glm", "question", new AbortController().signal), error => {
+    assert.ok(error instanceof DebateError); assert.equal(error.message, "provider.auth: Expired Console credential"); return true;
+  });
+});

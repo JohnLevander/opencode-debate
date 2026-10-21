@@ -11,7 +11,11 @@ export const AGENT_ID = "debater";
 export const MODEL_NAMES: Record<Debater, string> = { glm: "GLM", deepseek: "DeepSeek" };
 export const NO_TOOLS = [{ action: "*", resource: "*", effect: "deny" as const }];
 export function providerError(error: SessionStructuredError, retryAfter?: number): DebateError {
-  return new DebateError(error.status === 429 || /rate.?limit|too many requests/i.test(error.type) ? "rate_limit" : "transport", `${error.type}: ${error.message}`, retryAfter);
+  const nativeMessage = `${error.type}: ${error.message}`;
+  const message = /free tier can only be used from within OpenCode/i.test(error.message)
+    ? `${nativeMessage} This request already ran inside an OpenCode child session. OpenCode free models have a reported compatibility issue when read/shell tools are disabled; these debaters intentionally have all tools disabled. This error alone does not establish that a paid provider or OpenRouter API key is needed. The debate remains blocked; changing tool permissions requires approval. Upstream: https://github.com/anomalyco/opencode/issues/51241`
+    : nativeMessage;
+  return new DebateError(error.status === 429 || /rate.?limit|too many requests/i.test(error.type) ? "rate_limit" : "transport", message, retryAfter);
 }
 export class OpenCodeAdapter implements DebateAdapter {
   readonly sessions: SessionDetail[] = [];

@@ -48,3 +48,10 @@ Automated isolation remains separate: `npm run check` passes TypeScript and 40 c
 - Write per-child interrupt request times, acknowledgment times, returned `interrupted` flags, and acknowledgment errors to final logs. Both timeout/cancellation tests check these records.
 
 Phase 3 is reported with blocked provider acceptance. Approval is required before implementing Phase 4's OpenAI-compatible adapter and mock-server tests. That work would add a selectable backend; it would not itself authorize live paid inference.
+
+
+## User reproduction — 2026-10-20, 8:06 PM America/New_York
+
+The user's later free-only run reproduced the failure on OpenCode 2.0.32. Log `2026-10-21T00:06:31.445Z-what-is-the-best-microphone-under-50-for-vocal-singing-live-04981d33.json` records DeepSeek as Proposer, GLM as Challenger, zero Challenger rounds, and provider.auth during P0 after 250 ms. Both child interrupt requests were acknowledged as already idle. This is additional evidence of the same rejection, not a successful debate. No paid key/provider is implied by this error alone.
+
+The adapter now appends a specific explanation to this recognizable free-tier error: the request already used an OpenCode child, tool-disabled requests have a reported compatibility issue, and changing tool permissions requires approval. Unrelated authentication errors retain their original diagnosis. Two regression tests cover that distinction. The default remains the user's explicitly selected free OpenCode backend; no permissions were relaxed, no global settings were changed in this diagnostic patch, and no paid inference was performed.
