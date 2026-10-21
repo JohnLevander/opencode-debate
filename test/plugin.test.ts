@@ -28,6 +28,8 @@ test("v2 tool registration preserves exact description and hides/isolates debate
   const retry = { agent: "debater", decision: { retry: true } }; hooks.retry(retry); assert.deepEqual(retry.decision, { retry: false });
   assert.ok(debateArgs.safeParse({ question: "Question", max_rounds: 8 }).success);
   assert.ok(!debateArgs.safeParse({ question: "Question", max_rounds: 9 }).success);
+  assert.ok(debateArgs.safeParse({ question: "Question", min_rounds: 3, max_rounds: 6 }).success);
+  assert.ok(!debateArgs.safeParse({ question: "Question", min_rounds: 0 }).success);
 });
 test("generated command matches centralized template verbatim", async () => {
   assert.equal(await readFile("commands/debate.md", "utf8"), `---\ndescription: ${COMMAND_DESCRIPTION}\n---\n\n${COMMAND_BODY}\n`);
@@ -81,7 +83,7 @@ for (const scenario of ["converged", "cancelled", "timeout"] as const) {
     if (scenario === "timeout") fake.change({ onWait: async () => { if (fake.prompts.length) await new Promise<void>(() => {}); } });
     const ctx = { ...fake.client, location: { directory: root, project: { directory: root } }, app: { version: "2.0.32" } } as unknown as Plugin.Context;
     const progress: string[] = [];
-    const output = await executeDebate(ctx, { question: "test", first: "glm", include_transcript: true }, {
+    const output = await executeDebate(ctx, { question: "test", first: "glm", include_transcript: true, min_rounds: scenario === "converged" ? 2 : 1 }, {
       sessionID: "parent", agent: "build", signal: controller.signal, progress: async data => { progress.push(String(data.description)); },
     }, new Set());
     const expected = scenario === "timeout" ? "error" : scenario;
@@ -90,6 +92,7 @@ for (const scenario of ["converged", "cancelled", "timeout"] as const) {
     assert.equal(log.status, expected); assert.equal(log.sessions.length, 2); assert.equal(fake.created.length, 2);
     assert.equal(log.finalResult, output); assert.ok(progress.length >= 3);
     if (scenario === "converged") {
+      assert.equal(log.rounds, 2); assert.equal(log.turns.length, 4); assert.equal(log.args.min_rounds, 2);
       assert.equal(log.turns[0].reasoning, "secret reasoning"); assert.ok(!fake.prompts[1].text.includes("secret reasoning"));
       assert.match(output, /### Transcript/); assert.equal(log.answer, "A valid final answer");
     } else { assert.ok(fake.interrupts.includes("child-0")); assert.ok(fake.interrupts.includes("child-1")); assert.ok(log.interruptions.some((entry: any) => entry.sessionID === "child-0" && entry.acknowledgedAt)); assert.ok(log.interruptions.some((entry: any) => entry.sessionID === "child-1" && entry.acknowledgedAt)); }

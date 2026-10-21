@@ -28,7 +28,7 @@ export type DebateEvent =
   | { type: "retry"; turnID: string; reason: string; delayMs: number }
   | { type: "end"; result: DebateResult };
 export interface DebateOptions {
-  question: string; context?: string; maxRounds: number; first: Debater | "random";
+  question: string; context?: string; maxRounds: number; minRounds?: number; first: Debater | "random";
   callTimeoutMs: number; totalTimeoutMs: number;
   callModel: (debater: Debater, message: string, signal: AbortSignal) => Promise<{ text: string; reasoning?: string }>;
   onTurn?: (turn: Turn) => void; onEvent?: (event: DebateEvent) => void;

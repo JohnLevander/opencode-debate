@@ -117,3 +117,34 @@ test("rate limits make at most three attempts", async (t) => {
   for (let i = 0; i < 20; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(500); }
   const r = await result; assert.equal(r.status, "error"); assert.equal(calls.length, 3); assert.equal(r.turns[0].attempts.length, 3);
 });
+
+
+test("minimum rounds defers early agreement until each side has three turns", async () => {
+  const { result, calls } = scripted([json(), json(null, [], true), json(), json(null, [], true), json(), json(null, [], true)], { minRounds: 3 });
+  const r = await result;
+  assert.equal(r.status, "converged"); assert.equal(r.rounds, 3);
+  assert.deepEqual(r.turns.map(t => t.id), ["P0", "C1", "P1", "C2", "P2", "C3"]);
+  assert.equal(calls.filter(c => c.model === "glm").length, 3); assert.equal(calls.filter(c => c.model === "deepseek").length, 3);
+});
+test("minimum rounds defers repeated-ID stalemate while preserving both positions", async () => {
+  const r = await scripted([json(), json(null, [p()]), json("Revision 1", [p("C1", "defended")]), json(null, [p()]), json("Revision 2", [p("C1", "defended")]), json(null, [p()])], { minRounds: 3 }).result;
+  assert.equal(r.status, "stalemate"); assert.equal(r.rounds, 3); assert.equal(r.answer, "Revision 2");
+  assert.equal(r.points[0].proposerStatus, "defended"); assert.equal(r.points[0].status, "open");
+});
+test("earlier agreement does not hide a new objection at the minimum/maximum boundary", async () => {
+  const r = await scripted([json(), json(null, [], true), json("Rechecked"), json(null, [p()])], { minRounds: 2, maxRounds: 2 }).result;
+  assert.equal(r.status, "max_rounds"); assert.equal(r.rounds, 2); assert.equal(r.points[0].status, "open");
+});
+test("invalid minimum is rejected before any model call", async () => {
+  for (const minRounds of [0, -1, 1.5, 5, NaN]) {
+    const { result, calls } = scripted([], { minRounds });
+    assert.match((await result).reason, /min_rounds/); assert.equal(calls.length, 0);
+  }
+});
+test("minimum rounds never postpones cancellation or transport errors", async () => {
+  const controller = new AbortController();
+  const cancelled = await scripted([json(), () => new Promise(() => controller.abort())], { minRounds: 4, signal: controller.signal }).result;
+  assert.equal(cancelled.status, "cancelled"); assert.equal(cancelled.turns.length, 2);
+  const failed = await scripted([json(), new Error("provider unavailable")], { minRounds: 4 }).result;
+  assert.equal(failed.status, "error"); assert.equal(failed.answer, "The answer"); assert.match(failed.reason, /provider unavailable/);
+});

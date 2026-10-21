@@ -31,6 +31,7 @@ const messageOf = (error: unknown) => error instanceof Error ? error.message : S
 const snapshot = (points: Map<string, Point>) => structuredClone([...points.values()]);
 
 export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
+  const minRounds = opts.minRounds ?? 1;
   const now = opts.now ?? Date.now;
   const startedAt = now();
   const proposer: Debater = opts.first === "random" ? ((opts.random ? opts.random() < 0.5 : randomInt(0, 2) === 0) ? "glm" : "deepseek") : opts.first;
@@ -146,6 +147,7 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
   };
   try {
     if (!opts.question.trim() || !Number.isInteger(opts.maxRounds) || opts.maxRounds < 1 || opts.maxRounds > 8 || !Number.isFinite(opts.callTimeoutMs) || opts.callTimeoutMs <= 0 || !Number.isFinite(opts.totalTimeoutMs) || opts.totalTimeoutMs <= 0) throw new DebateError("protocol", "Invalid debate options");
+    if (!Number.isInteger(minRounds) || minRounds < 1 || minRounds > opts.maxRounds) throw new DebateError("protocol", "min_rounds must be an integer from 1 to max_rounds");
     live(); opts.onEvent?.({ type: "start", assignment: result.assignment });
     let proposal = await takeTurn("P0", 0, "proposer", openingPrompt(opts.question, opts.context));
     result.answer = proposal.parsed!.answer;
@@ -156,11 +158,11 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
       applyChallenger(critique.parsed!);
       result.pointHistory.push({ turnID: critique.id, points: snapshot(points) });
       const open = [...points.values()].filter((p) => p.status === "open").map((p) => p.id).sort();
-      if (critique.parsed!.agrees_with_current_answer && !open.length) {
+      if (round >= minRounds && critique.parsed!.agrees_with_current_answer && !open.length) {
         result.status = "converged"; result.reason = "Challenger endorses the current answer with no open points"; break;
       }
       const key = JSON.stringify(open);
-      if (round >= 2 && previousOpen === key) { result.status = "stalemate"; result.reason = "Open point IDs are unchanged across consecutive Challenger turns"; break; }
+      if (round >= Math.max(2, minRounds) && previousOpen === key) { result.status = "stalemate"; result.reason = "Open point IDs are unchanged across consecutive Challenger turns"; break; }
       if (round === opts.maxRounds) { result.status = "max_rounds"; result.reason = "Maximum Challenger rounds reached"; break; }
       previousOpen = key;
       proposal = await takeTurn(`P${round}`, round, "proposer", revisionPrompt(critique.text!, snapshot(points)));

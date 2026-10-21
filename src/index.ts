@@ -13,6 +13,7 @@ import { renderResult } from "./render.ts";
 
 export const debateArgs = z.object({
   question: z.string().trim().min(1).max(100_000), context: z.string().max(300_000).optional(),
+  min_rounds: z.number().int().min(1).max(8).optional().describe("Minimum turns per side before convergence or stalemate may stop the debate; defaults to 1. Must not exceed max_rounds."),
   max_rounds: z.number().int().min(1).max(8).optional(), first: z.enum(["glm", "deepseek", "random"]).default("random"),
   include_transcript: z.boolean().default(false),
 }).strict();
@@ -42,7 +43,7 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
   if (execution.signal.aborted) cancel();
   try {
     const result = await runDebate({
-      question: args.question, context: args.context, maxRounds: args.max_rounds ?? config.defaultMaxRounds,
+      question: args.question, context: args.context, maxRounds: args.max_rounds ?? config.defaultMaxRounds, minRounds: args.min_rounds,
       first: args.first, callTimeoutMs: config.callTimeoutMs, totalTimeoutMs: config.totalTimeoutMs, signal: execution.signal,
       callModel: async (...params) => {
         if (configurationError) throw configurationError;

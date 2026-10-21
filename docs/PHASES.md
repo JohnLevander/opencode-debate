@@ -70,3 +70,13 @@ The user approved the exact merge into `~/.config/opencode/debate.config.json`: 
 The user's code-review caller searched Code Mode and declared debate absent despite the plugin being active in that session's project. The earlier registration used codemode false, which excludes a direct tool from Code Mode search. Changed debate to a pinned Code Mode registration and updated the centralized command to request immediate invocation, pass supplied attachments as context, await the discovered callable, and avoid a simulated substitute. Child restrictions and deterministic orchestration are unchanged.
 
 The registration regression test passes. A separate isolated OpenCode 2.0.32 context probe confirmed codemode true/pinned true and the debate signature in assembled catalog instructions, with execute advertised; it deliberately aborted before inference. No global file changes or new model requests were needed. The caller's failed code-review attempt created no debate log. Parent provider retries are separate from the engine's bounded retry budget.
+
+
+## Requested minimum rounds
+
+Added optional tool `min_rounds` and pure-engine `minRounds`, default 1. Convergence and repeated-open-ID stalemate checks are gated by that minimum; the engine continues alternating full proposals and reviews until it is reached. Three rounds means three turns each, counting P0: P0/C1/P1/C2/P2/C3. Cancellation, transport/protocol errors, and call/total deadlines retain priority. Invalid ranges, including a minimum greater than the effective maximum, fail before any model call. Prompts allow an unchanged answer when independent rechecking reveals no new objection; the minimum does not require invented disagreement.
+
+Validation covers early agreement, repeated objections, a new objection after prior agreement at the min/max boundary, invalid bounds with no calls, early cancellation/provider errors, and full plugin log/adapter propagation. Existing default behavior remains covered. This feature has deterministic scripted coverage; no additional live-model debate was run to force a minimum-length exchange.
+
+
+Minimum-round verification: TypeScript and all 73 tests pass (including the two friend-setup tests). OpenChamber's OpenCode server had zero active sessions, so locations were reloaded without editing any global file. A temporary repo-local audit hook on that server confirmed registered codemode true/pinned true, execute advertised, and both debate and min_rounds in the assembled catalog instructions. It stopped before inference; its local .opencode fixture was disabled afterward. This verifies active-server exposure, not model compliance or a new successful debate.
