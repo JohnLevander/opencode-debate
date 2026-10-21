@@ -80,3 +80,10 @@ Validation covers early agreement, repeated objections, a new objection after pr
 
 
 Minimum-round verification: TypeScript and all 73 tests pass (including the two friend-setup tests). OpenChamber's OpenCode server had zero active sessions, so locations were reloaded without editing any global file. A temporary repo-local audit hook on that server confirmed registered codemode true/pinned true, execute advertised, and both debate and min_rounds in the assembled catalog instructions. It stopped before inference; its local .opencode fixture was disabled afterward. This verifies active-server exposure, not model compliance or a new successful debate.
+
+
+## Requested contribution winner line
+
+Added a pure deterministic retained-phrases-v1 scorer and a result line reporting a contribution winner/tie/undetermined with both word counts. It credits normalized final-answer words covered by matching five-word phrases (at least three non-stop words) to the first valid answer/point introducing them, excluding supplied question/context. Counts, method, basis, and winner are logged. Error/cancelled partial answers never declare a winner. Scoring has no effect on protocol control and makes no extra model calls.
+
+This is explicitly a text-reuse estimate: paraphrases are not semantically attributed, and retained opening content favors its original Proposer. Tests cover adopted Challenger wording, earliest-source credit despite repetition/casing, provided context, ties, short/unmatched text, paraphrases, invalid replies, and incomplete outcomes. Plugin integration checks result rendering and persistent score metadata.

@@ -1,4 +1,5 @@
 import { randomInt } from "node:crypto";
+import { scoreContributions } from "./contribution.ts";
 import { parseReply } from "./parse.ts";
 import { DebateError, type DebateOptions, type DebateResult, type Debater, type Point, type Reply, type Role, type Turn } from "./types.ts";
 import { openingPrompt, firstCritiquePrompt, critiquePrompt, revisionPrompt, missingPointsPrompt, JSON_REPAIR, INTERRUPTION_PREFIX } from "../prompts.ts";
@@ -180,6 +181,7 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
     clearTimeout(totalTimer); opts.signal?.removeEventListener("abort", cancel);
     result.points = snapshot(points); result.endedAt = now();
   }
+  result.contributions = scoreContributions(result);
   opts.onEvent?.({ type: "end", result: structuredClone(result) });
   return result;
 }

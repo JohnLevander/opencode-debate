@@ -16,8 +16,14 @@ export interface Turn {
   startedAt: number; endedAt: number; retries: number; attempts: Attempt[]; text?: string; reasoning?: string; parsed?: Reply; error?: string;
 }
 export type DebateStatus = "converged" | "stalemate" | "max_rounds" | "cancelled" | "error";
+export interface ContributionScore {
+  method: "retained-phrases-v1"; winner: Debater | "tie" | "undetermined";
+  words: Record<Debater, number>; providedWords: number; unmatchedWords: number; totalWords: number;
+  basis: "final" | "partial" | "none";
+}
 export interface DebateResult {
   question: string; context?: string; assignment: { proposer: Debater; challenger: Debater };
+  contributions?: ContributionScore;
   status: DebateStatus; reason: string; rounds: number; answer: string | null;
   points: Point[]; pointHistory: { turnID: string; points: Point[] }[];
   turns: Turn[]; startedAt: number; endedAt: number;

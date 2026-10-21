@@ -93,6 +93,7 @@ for (const scenario of ["converged", "cancelled", "timeout"] as const) {
     assert.equal(log.finalResult, output); assert.ok(progress.length >= 3);
     if (scenario === "converged") {
       assert.equal(log.rounds, 2); assert.equal(log.turns.length, 4); assert.equal(log.args.min_rounds, 2);
+      assert.equal(log.contributions.method, "retained-phrases-v1"); assert.match(output, /Contribution winner \(text-reuse estimate\)/);
       assert.equal(log.turns[0].reasoning, "secret reasoning"); assert.ok(!fake.prompts[1].text.includes("secret reasoning"));
       assert.match(output, /### Transcript/); assert.equal(log.answer, "A valid final answer");
     } else { assert.ok(fake.interrupts.includes("child-0")); assert.ok(fake.interrupts.includes("child-1")); assert.ok(log.interruptions.some((entry: any) => entry.sessionID === "child-0" && entry.acknowledgedAt)); assert.ok(log.interruptions.some((entry: any) => entry.sessionID === "child-1" && entry.acknowledgedAt)); }
