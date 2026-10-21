@@ -11,15 +11,31 @@ This guide uses only `opencode/glm-5.3-flash-free` and `opencode/deepseek-v4.1-f
 
 ## Get the files and check them
 
-Unzip `opencode-debate-0.1.0.zip` into a permanent folder, such as `~/dev/opencode-debate`. If a GitHub repository has been published, clone its actual URL into that folder instead. The release ZIP contains source and the lockfile; dependencies are installed locally. Keep the folder in place: installation links point to it.
+Get the source from [JohnLevander/opencode-debate](https://github.com/JohnLevander/opencode-debate). Keep it in a permanent folder: installation links point to it.
+
+For a new installation with Git:
 
 ```sh
+mkdir -p ~/dev
+git clone https://github.com/JohnLevander/opencode-debate.git ~/dev/opencode-debate
 cd ~/dev/opencode-debate
 node --version
 npm ci --ignore-scripts --include=dev --cache .cache/npm
 npm run check
 npm run setup:free -- --preview
 ```
+
+If that folder already exists, follow the update instructions below or choose a different permanent folder; do not clone over it.
+
+Without Git, download [opencode-debate-0.1.0.zip](https://github.com/JohnLevander/opencode-debate/releases/download/v0.1.0/opencode-debate-0.1.0.zip) and its [SHA-256 checksum](https://github.com/JohnLevander/opencode-debate/releases/download/v0.1.0/opencode-debate-0.1.0.zip.sha256). Verify the downloaded ZIP from the folder containing both files:
+
+```sh
+# macOS
+shasum -a 256 -c opencode-debate-0.1.0.zip.sha256
+# Linux: sha256sum -c opencode-debate-0.1.0.zip.sha256
+```
+
+Unzip into `~/dev/` to create `~/dev/opencode-debate`, then run the commands above starting at `cd ~/dev/opencode-debate`. Release ZIPs include source and the lockfile; dependencies are installed locally. Browse [all releases](https://github.com/JohnLevander/opencode-debate/releases) for future versions.
 
 The preview makes **no changes**. It shows these exact operations, honoring `XDG_CONFIG_HOME` when set:
 
@@ -92,7 +108,19 @@ If the free models disappear from OpenCode's inventory, this preset cannot resto
 
 ## Update and uninstall
 
-For a Git clone, pull reviewed updates in the existing folder. For a ZIP install, replace source in that folder with a reviewed release, retaining no local secret/config files in the distributable. Then rerun dependency installation, `npm run check`, setup preview, and setup apply if desired; restart OpenCode. Existing links work as long as the folder stays at the same path.
+For a Git clone, update in the existing folder when no debate is running:
+
+```sh
+cd ~/dev/opencode-debate
+git pull --ff-only
+npm ci --ignore-scripts --include=dev --cache .cache/npm
+npm run check
+npm run setup:free -- --preview
+```
+
+Review changes and run `npm run setup:free -- --apply` if you want to reapply the free preset, then restart OpenCode. `git pull --ff-only` refuses to merge diverged local work; review your changes before resolving that situation.
+
+For a ZIP install, download a reviewed release from the [releases page](https://github.com/JohnLevander/opencode-debate/releases), verify its checksum, replace source in the existing folder, and rerun dependency installation and checks. Keep local secrets/configuration out of anything you share. Existing links work as long as the folder stays at the same path.
 
 Preview link paths before removing them:
 
@@ -112,4 +140,4 @@ npm run check
 npm run release:zip
 ```
 
-The release script archives tracked files from the current commit into `dist/` and prints a SHA-256 checksum. It excludes Git history, local configs, dependencies, credentials, logs, caches, and test runtime data. Share the ZIP plus checksum. GitHub is optional for ZIP installation; no public repository has been created by the installer.
+The release script archives tracked files from the current commit into `dist/` and prints a SHA-256 checksum. It excludes Git history, local configs, dependencies, credentials, logs, caches, and test runtime data. Share the ZIP plus checksum. Friends can install from the [public repository](https://github.com/JohnLevander/opencode-debate) or its [release downloads](https://github.com/JohnLevander/opencode-debate/releases). These local setup/release scripts do not publish anything to GitHub.

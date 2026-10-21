@@ -6,31 +6,32 @@ An OpenCode **2.0.32** plugin for debates between GLM 5.3 Flash Free and DeepSee
 
 ## Install and uninstall
 
-**Sharing with friends:** follow the [free setup guide](docs/INSTALL.md). It includes preview/apply scripts, a smoke test, updates, troubleshooting, and a source ZIP command. No API key is needed for that preset.
+Requires **OpenCode 2.0.32**, Node.js **24**, npm, and Bash. macOS is tested; native Windows installation is unverified. A separate Bun installation is unnecessary.
 
-Requires Node.js 24 for development/tests and OpenCode 2.0.32 with its embedded Bun runtime. A separate Bun installation is unnecessary.
+Clone this public repository into a permanent folder and preview the free setup:
 
 ```sh
+mkdir -p ~/dev
+git clone https://github.com/JohnLevander/opencode-debate.git ~/dev/opencode-debate
 cd ~/dev/opencode-debate
-npm ci --ignore-scripts --cache .cache/npm
+npm ci --ignore-scripts --include=dev --cache .cache/npm
 npm run check
-npm run install:preview
+npm run setup:free -- --preview
 ```
 
-Review the preview and approve its global changes before running:
+If that folder already exists, use the [update instructions](docs/INSTALL.md#update-and-uninstall). Review the printed paths and JSON, then approve the changes:
 
 ```sh
-bash scripts/install.sh --apply
+npm run setup:free -- --apply
 ```
 
-The installer creates two links:
+The setup creates plugin/command links and merges a private `debate.config.json` selecting the two free models, low reasoning variants, and restricted-read compatibility. Other validated debate settings are preserved; unrelated link targets are refused. It makes no credential, provider-policy, or `opencode.json(c)` changes. It honors `XDG_CONFIG_HOME`. No API key is needed, and there is no automatic paid fallback.
 
-- `~/.config/opencode/plugins/opencode-debate` → this repository
-- `~/.config/opencode/commands/debate.md` → this repository's `commands/debate.md`
+Restart OpenCode through **OpenChamber → Settings → General → Restart OpenCode** after active work finishes, refresh OpenChamber, and start a chat with a model explicitly marked **Free**. The preset configures debate children; it does not restrict your whole OpenCode account to free providers. Keep this repository at its installed path.
 
-It honors `XDG_CONFIG_HOME`, refuses to overwrite unrelated entries, and makes no `opencode.json(c)` changes. The plugin defines its hidden agent itself. Restart OpenCode/OpenChamber after installation; links keep subsequent repository changes connected to the installation. Stop running debates before restarting.
+**For friends:** [full installation guide](docs/INSTALL.md) · [release ZIP and checksum](https://github.com/JohnLevander/opencode-debate/releases/latest). The guide covers downloads without Git, permissions, smoke tests, updates, and troubleshooting.
 
-To remove only those links, preview their paths and approve the removal first, then run `bash scripts/install.sh --uninstall` and restart. Existing logs and child sessions are retained. The installer does not delete them or modify your existing free-only plugin or provider policies.
+To uninstall, preview with `bash scripts/install.sh --dry-run`, then run `bash scripts/install.sh --uninstall` and restart OpenCode. Only matching plugin/command links are removed; config, logs, dependencies, and child sessions are retained. The lower-level `scripts/install.sh --apply` creates links only; use `setup:free` for the complete free preset.
 
 ## Use
 
