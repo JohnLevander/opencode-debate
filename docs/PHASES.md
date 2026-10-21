@@ -1,5 +1,7 @@
 # Phase reports
 
+Current source status, 2026-10-21: all four phases and the approved follow-ups are implemented. `npm run check` passes TypeScript and 228 tests. The sections below preserve results at each milestone, including historical test counts and approval boundaries. See the final section for the latest retry/adapter changes and [README.md](../README.md) for current setup and behavior.
+
 ## Phase 1 — deterministic core
 
 Implemented `src/core/{types,parse,debate}.ts` and all model-facing text in `src/prompts.ts`. Added the complete user specification as `docs/SPEC.md`.
@@ -119,3 +121,11 @@ Windows uses Ubuntu/WSL 2 with the CLI/browser interface, with an optional docum
 
 
 Documentation validation: all 25 shell blocks across the README and installation/onboarding guides pass bash syntax checks; relative file/heading links resolve; package.json and both lockfile version fields agree at 0.1.1. Updated guide text passes the common secret-pattern check. These checks do not execute platform installers, sign in to any account, or establish Windows/Linux runtime support.
+
+## Retry and adapter hardening — 2026-10-21
+
+Expanded statusless provider-error classification to recognize endpoint/upstream-unavailable, gateway-timeout/bad-gateway tokens, and rate-limit message wording. Permanent HTTP statuses retain precedence. Retry-After parsing accepts surrounding whitespace; interrupted HTTP-200 bodies preserve header hints. Rate-limit/outage retries remain shared across repairs and bounded by the existing budgets and deadlines.
+
+The OpenAI-compatible fallback now accepts top-level and nested `error.retry_after` hints in both HTTP-200 error envelopes and retryable HTTP error responses such as 429/503. Valid headers take precedence, including zero. Optional HTTP error-body reads are limited to 64 KiB and one second, respond to cancellation, and preserve the known HTTP classification if the body is malformed, oversized, interrupted, or stalled. Permanent HTTP errors skip inspection. Body contents remain absent from diagnostics and logs; failed requests do not enter history.
+
+Progress callbacks now tolerate plain return values as well as Promises. Expanded regression coverage exercises native initialization/idle errors, interrupt diagnostics, argument/configuration guards, journals, concurrent execution, progress failures, UTF-8 chunk boundaries, and retry-hint precedence/backoff. TypeScript and all 228 tests pass, including nine tests for the HTTP error-body fix. The specification and historical reports now identify current behavior separately from earlier proposals/results. No new live inference or application restart was performed for these changes.

@@ -2,7 +2,9 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { runDebate } from "../src/core/debate.ts";
 import { parseReply } from "../src/core/parse.ts";
-import { DebateError, type DebateOptions, type Reply, type ReplyPoint } from "../src/core/types.ts";
+import { DebateError, type DebateOptions, type DebateResult, type Reply, type ReplyPoint } from "../src/core/types.ts";
+import { renderResult } from "../src/render.ts";
+import { defaults } from "../src/config.ts";
 import { INTERRUPTION_PREFIX } from "../src/prompts.ts";
 
 const p = (id = "C1", status: ReplyPoint["status"] = "open"): ReplyPoint => ({ id, status, summary: `Issue ${id}`, note: `${status} because of specific evidence` });
@@ -345,4 +347,58 @@ test("proposer prompts never advertise the Challenger's next unused ID", async (
   assert.ok(!calls[1].message.includes("Next unused ID"));
   assert.match(calls[1].message, /only the Challenger may introduce them/);
   assert.match(calls[2].message, /Next unused ID: C1/);
+});
+
+test("runDebate rejects blank questions before any model call", async () => {
+  const { result, calls } = scripted([], { question: "   " });
+  const r = await result; assert.equal(r.status, "error"); assert.match(r.reason, /Invalid debate options/); assert.equal(calls.length, 0);
+});
+test("runDebate validates maxRounds bounds before any model call", async () => {
+  for (const maxRounds of [0, 9, 1.5, NaN]) {
+    const { result, calls } = scripted([], { maxRounds });
+    const r = await result; assert.match(r.reason, /Invalid debate options/); assert.equal(calls.length, 0);
+  }
+});
+test("runDebate validates timeouts before any model call", async () => {
+  for (const extra of [{ callTimeoutMs: 0 }, { callTimeoutMs: -1 }, { callTimeoutMs: NaN }, { totalTimeoutMs: 0 }, { totalTimeoutMs: NaN }] as const) {
+    const { result, calls } = scripted([], extra);
+    const r = await result; assert.match(r.reason, /Invalid debate options/); assert.equal(calls.length, 0);
+  }
+});
+
+const synth = (overrides: Partial<DebateResult> = {}): DebateResult => ({
+  question: "Q", assignment: { proposer: "glm", challenger: "deepseek" }, limits: { minRounds: 1, maxRounds: 4 },
+  stopChecks: [], status: "error", reason: "test", rounds: 1, answer: "A", points: [], pointHistory: [],
+  turns: [], startedAt: 0, endedAt: 1, ...overrides,
+});
+test("rendered failure lines report turn, code, and attempt counts", () => {
+  const output = renderResult(synth({ failure: { code: "rate_limit", turnID: "C2", debater: "deepseek", attempts: 3, validationFailures: 1 } }), defaults(), "/log.json", []);
+  assert.match(output, /Stopped at C2 \(rate_limit\); 3 attempt\(s\) in that turn; 1 rejected reply attempt\(s\) across the run\./);
+});
+test("a failure before any turn renders as initialization", () => {
+  const output = renderResult(synth({ failure: { code: "protocol", attempts: 0, validationFailures: 0 } }), defaults(), "/log.json", []);
+  assert.match(output, /Stopped at initialization \(protocol\)/);
+});
+test("an exhausted rate-limit debate renders its failure line end to end", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const limited = () => new DebateError("rate_limit", "HTTP 429");
+  const { result } = scripted([limited(), limited(), limited()], { totalTimeoutMs: 30_000, callTimeoutMs: 5000 });
+  for (let i = 0; i < 40; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(500); }
+  const output = renderResult(await result, defaults(), "/log.json", []);
+  assert.match(output, /Stopped at P0 \(rate_limit\); 3 attempt\(s\) in that turn; 0 rejected reply attempt\(s\) across the run\./);
+});
+test("open points render with both sides' positions", () => {
+  const output = renderResult(synth({ status: "stalemate", points: [{ id: "C1", summary: "Missing case", status: "open", challenger: "The input is unhandled", proposer: "Not yet addressed" }] }), defaults(), "/log.json", []);
+  assert.match(output, /### Unresolved points\n- C1: Missing case\. Challenger: The input is unhandled\. Proposer: Not yet addressed\./);
+});
+test("multiple open points render as separate bullets in order", () => {
+  const output = renderResult(synth({ points: [
+    { id: "C1", summary: "First", status: "open", challenger: "c1", proposer: "p1" },
+    { id: "C2", summary: "Second", status: "open", challenger: "c2", proposer: "p2" }] }), defaults(), "/log.json", []);
+  const bullets = output.split("\n").filter(l => l.startsWith("- C"));
+  assert.deepEqual(bullets, ["- C1: First. Challenger: c1. Proposer: p1.", "- C2: Second. Challenger: c2. Proposer: p2."]);
+});
+test("no open points on an unconverged debate renders the explicit no-agreement notice", () => {
+  const output = renderResult(synth({ status: "stalemate", points: [] }), defaults(), "/log.json", []);
+  assert.match(output, /### Unresolved points\nNo validated open points were recorded\. This does not establish agreement; the debate did not converge\./);
 });

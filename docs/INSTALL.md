@@ -39,6 +39,8 @@ shasum -a 256 -c opencode-debate-0.1.1.zip.sha256
 
 Unzip into `~/dev/` to create `~/dev/opencode-debate`, then run the commands above starting at `cd ~/dev/opencode-debate`. Release ZIPs include source and the lockfile; dependencies are installed locally. Browse [all releases](https://github.com/JohnLevander/opencode-debate/releases) for future versions.
 
+Versioned release ZIPs contain their tagged source snapshot. Fixes pushed to `main` after that release are available through the Git installation/update route until a new release is published.
+
 The preview makes **no changes**. It shows these exact operations, honoring `XDG_CONFIG_HOME` when set:
 
 1. Link `~/.config/opencode/plugins/opencode-debate` to this folder.

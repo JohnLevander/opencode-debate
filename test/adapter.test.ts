@@ -4,6 +4,7 @@ import { OpenCodeAdapter, type OpenCodeClient } from "../src/adapters/opencode.t
 import { providerFailureCode } from "../src/adapters/http.ts";
 import { defaults } from "../src/config.ts";
 import { DebateError } from "../src/core/types.ts";
+import { runDebate } from "../src/core/debate.ts";
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 import { fakeClient } from "./helpers/fake.ts";
@@ -249,4 +250,142 @@ test("release clears captured retry hints for retained child sessions", async ()
   assert.equal(hints.size, 2);
   adapter.release();
   assert.equal(hints.size, 0);
+});
+
+test("native initialization failures are permanent single-dispatch errors in the engine", async () => {
+  const events: any[] = [];
+  const fake = fakeClient(); fake.raw.model.list = async () => ({ data: [] });
+  const adapter = new OpenCodeAdapter(fake.client, defaults(), "parent", "q", new Set());
+  adapter.setAssignment({ proposer: "glm", challenger: "deepseek" });
+  const r = await runDebate({ question: "q", first: "glm", maxRounds: 1, callTimeoutMs: 1000, totalTimeoutMs: 5000, callModel: adapter.callModel, onEvent: e => events.push(e) });
+  assert.equal(r.status, "error"); assert.equal(r.failure?.code, "transport");
+  assert.equal(r.turns[0].attempts.length, 1); assert.equal(events.filter(e => e.type === "retry").length, 0);
+});
+test("repeated native initialization attempts keep failing without creating children", async () => {
+  const fake = fakeClient(); fake.raw.model.list = async () => ({ data: [] });
+  const adapter = new OpenCodeAdapter(fake.client, defaults(), "parent", "q", new Set());
+  adapter.setAssignment({ proposer: "glm", challenger: "deepseek" });
+  for (let i = 0; i < 2; i++) await assert.rejects(adapter.callModel("glm", "q", new AbortController().signal), /unavailable.*openai-compatible/s);
+  assert.equal(fake.created.length, 0);
+});
+test("an unavailable variant is also a permanent single-dispatch failure", async () => {
+  const config = defaults(); config.models.glm.variant = "missing";
+  const fake = fakeClient(); const adapter = new OpenCodeAdapter(fake.client, config, "parent", "q", new Set());
+  adapter.setAssignment({ proposer: "glm", challenger: "deepseek" });
+  const r = await runDebate({ question: "q", first: "glm", maxRounds: 1, callTimeoutMs: 1000, totalTimeoutMs: 5000, callModel: adapter.callModel });
+  assert.equal(r.status, "error"); assert.equal(r.failure?.code, "transport"); assert.equal(r.turns[0].attempts.length, 1);
+});
+
+function withIdleError(error: any) {
+  const fake = fakeClient();
+  const original = fake.raw.session.context;
+  fake.raw.session.context = async ({ sessionID }: any) => {
+    const messages = await original({ sessionID });
+    return messages.some((m: any) => m.type === "assistant") ? [...messages, { type: "idle", error }] : messages;
+  };
+  return fake;
+}
+test("an idle-message capacity error classifies as provider_unavailable", async () => {
+  const fake = withIdleError({ type: "provider.error", message: "Temporarily offline", status: 503 });
+  const adapter = new OpenCodeAdapter(fake.client, defaults(), "parent", "q", new Set());
+  adapter.setAssignment({ proposer: "glm", challenger: "deepseek" });
+  await assert.rejects(adapter.callModel("glm", "question", new AbortController().signal), e => e instanceof DebateError && e.code === "provider_unavailable");
+});
+test("an idle-message authentication error classifies as transport", async () => {
+  const fake = withIdleError({ type: "provider.auth", message: "Expired credential", status: 401 });
+  const adapter = new OpenCodeAdapter(fake.client, defaults(), "parent", "q", new Set());
+  adapter.setAssignment({ proposer: "glm", challenger: "deepseek" });
+  await assert.rejects(adapter.callModel("glm", "question", new AbortController().signal), e => e instanceof DebateError && e.code === "transport");
+});
+test("an idle message without an error does not fail the turn", async () => {
+  const fake = withIdleError(undefined);
+  const adapter = new OpenCodeAdapter(fake.client, defaults(), "parent", "q", new Set());
+  adapter.setAssignment({ proposer: "glm", challenger: "deepseek" });
+  assert.match((await adapter.callModel("glm", "question", new AbortController().signal)).text, /reply 1/);
+});
+
+test("unacknowledged interrupts record interrupted: false with a timestamp", async () => {
+  const fake = fakeClient(); fake.raw.session.interrupt = async ({ sessionID }: any) => { fake.interrupts.push(sessionID); return { interrupted: false }; };
+  const adapter = new OpenCodeAdapter(fake.client, defaults(), "parent", "q", new Set());
+  adapter.setAssignment({ proposer: "glm", challenger: "deepseek" });
+  await adapter.callModel("glm", "question", new AbortController().signal);
+  await adapter.cancelAll();
+  assert.equal(adapter.interruptions.length, 2);
+  for (const observation of adapter.interruptions) { assert.equal(observation.interrupted, false); assert.ok(observation.acknowledgedAt! > 0); }
+});
+test("abort-driven interrupts keep recording the acknowledgement result", async () => {
+  const fake = fakeClient(); fake.raw.session.interrupt = async ({ sessionID }: any) => { fake.interrupts.push(sessionID); return { interrupted: false }; };
+  fake.change({ onWait: async () => { if (fake.prompts.length) await new Promise<void>(() => {}); } });
+  const adapter = new OpenCodeAdapter(fake.client, defaults(), "parent", "q", new Set());
+  adapter.setAssignment({ proposer: "glm", challenger: "deepseek" });
+  const controller = new AbortController();
+  const pending = adapter.callModel("glm", "question", controller.signal);
+  await new Promise(resolve => setImmediate(resolve));
+  controller.abort(new DebateError("call_timeout", "Call timeout"));
+  await assert.rejects(pending, /Call timeout/);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(adapter.interruptions.some(o => o.interrupted === false));
+});
+test("interrupt failures are recorded as diagnostics without throwing", async () => {
+  const fake = fakeClient(); fake.raw.session.interrupt = async ({ sessionID }: any) => { fake.interrupts.push(sessionID); throw new Error("server unreachable"); };
+  const adapter = new OpenCodeAdapter(fake.client, defaults(), "parent", "q", new Set());
+  adapter.setAssignment({ proposer: "glm", challenger: "deepseek" });
+  await adapter.callModel("glm", "question", new AbortController().signal);
+  await adapter.cancelAll();
+  assert.equal(adapter.interruptions.length, 2); assert.equal(adapter.diagnostics.length, 2);
+  for (const observation of adapter.interruptions) { assert.match(observation.error!, /server unreachable/); assert.equal(observation.acknowledgedAt, undefined); }
+});
+
+test("future-dated Retry-After values compute their forward delay", async () => {
+  const { retryAfterMs } = await import("../src/adapters/http.ts");
+  assert.equal(retryAfterMs("Thu, 01 Jan 1970 00:00:05 GMT", 2000), 3000);
+  assert.equal(retryAfterMs("Thu, 01 Jan 1970 00:00:02 GMT", 2000), 0);
+});
+test("a near-future HTTP-date yields its remaining milliseconds", async () => {
+  const { retryAfterMs } = await import("../src/adapters/http.ts");
+  // toUTCString truncates milliseconds; align the target to a whole second so the window is deterministic.
+  const now = Date.now();
+  const target = new Date(Math.ceil((now + 2500) / 1000) * 1000).toUTCString();
+  const delay = retryAfterMs(target, now)!;
+  assert.ok(delay >= 2500 && delay <= 3500, `delay=${delay}`);
+});
+test("a far-future HTTP-date stays finite for deadline clamping", async () => {
+  const { retryAfterMs } = await import("../src/adapters/http.ts");
+  const delay = retryAfterMs("Fri, 01 Jan 2100 00:00:00 GMT", 0);
+  assert.ok(typeof delay === "number" && Number.isFinite(delay) && delay > 3e11);
+});
+
+test("rate-limit message wording without a type classifies as rate_limit", () => {
+  assert.equal(providerFailureCode(undefined, "", "Too many requests; slow down"), "rate_limit");
+});
+test("quota-exceeded message wording classifies as rate_limit", () => {
+  assert.equal(providerFailureCode(undefined, "", "quota exceeded: too many requests for this model"), "rate_limit");
+});
+test("endpoint_unavailable and upstream_unavailable types classify as outages", () => {
+  assert.equal(providerFailureCode(undefined, "endpoint_unavailable", "provider detail"), "provider_unavailable");
+  assert.equal(providerFailureCode(undefined, "upstream_unavailable", "provider detail"), "provider_unavailable");
+});
+test("gateway timeout and bad gateway types classify as outages", () => {
+  assert.equal(providerFailureCode(undefined, "gateway_timeout", "provider detail"), "provider_unavailable");
+  assert.equal(providerFailureCode(undefined, "bad_gateway", "provider detail"), "provider_unavailable");
+});
+test("request_timeout stays permanent so client-side timeouts do not loop", () => {
+  assert.equal(providerFailureCode(undefined, "request_timeout", "provider detail"), "transport");
+});
+test("Retry-After tolerates padded plain seconds", async () => {
+  const { retryAfterMs } = await import("../src/adapters/http.ts");
+  assert.equal(retryAfterMs(" 3 "), 3000);
+  assert.equal(retryAfterMs("3\n"), 3000);
+});
+test("Retry-After tolerates a padded HTTP-date", async () => {
+  const { retryAfterMs } = await import("../src/adapters/http.ts");
+  assert.equal(retryAfterMs(" Thu, 01 Jan 1970 00:00:02 GMT ", 1000), 1000);
+});
+test("string rate-limit guidance without a type classifies as rate_limit", () => {
+  assert.equal(providerFailureCode(undefined, "", "Rate limit exceeded. Retry in 3 seconds."), "rate_limit");
+});
+test("a padded zero Retry-After still yields a usable floor hint", async () => {
+  const { retryAfterMs } = await import("../src/adapters/http.ts");
+  assert.equal(retryAfterMs(" 0 "), 0);
 });

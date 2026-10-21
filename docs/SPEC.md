@@ -1,13 +1,18 @@
-This file replaces the spec pasted into chat, which was cut off partway through the Architecture section. It incorporates docs/FINDINGS.md (commit 7dca46f). Where this spec and FINDINGS.md disagree about an OpenCode API detail, follow FINDINGS.md, since it reflects the installed OpenCode 2.0.32, and point out the conflict in your phase report.
+# Specification
+
+Updated 2026-10-21 to reflect the implemented protocol, retry handling, and approved follow-ups. The phase plan below records the original delivery sequence; completed phases and later approvals are documented in [PHASES.md](PHASES.md). [README.md](../README.md) is the current usage/configuration reference. [FINDINGS.md](FINDINGS.md) records the pinned OpenCode 2.0.32 API investigation; its early implementation proposals are historical.
+
 When I explicitly ask for a debate, a debate tool randomly assigns GLM 5.3 Flash Free and DeepSeek V4.1 Flash Free to the roles of Proposer and Challenger. The two models alternate critique and revision, and the tool returns either a converged answer or a clear list of points they still disagree on. All loop control (randomness, round counting, convergence and stalemate detection, JSON parsing, retries, deadlines, logging) is deterministic TypeScript. No LLM orchestrates the loop.
+
 - Commit after each phase with a descriptive message. Never commit secrets.
 - Use the v2 plugin API (@opencode/plugin) exactly as documented in FINDINGS.md. No v1 patterns.
 - Don't guess APIs. When uncertain, check the installed types or source, and say so.
 - Before editing anything outside the repo (global config, global plugin/command/agent directories), show me the exact change and wait for approval.
 - All prompt templates live in src/prompts.ts so I can tune them without touching logic.
 - Pause points: (1) any change outside the repo; (2) after the Phase 3 live tests, report results and wait before starting Phase 4.
+
 types.ts, parse.ts, and debate.ts. Engine signature, roughly:
-ts
+
 ```ts
 type Debater = "glm" | "deepseek";
 
@@ -15,6 +20,7 @@ function runDebate(opts: {
   question: string;
   context?: string;
   maxRounds: number;
+  minRounds?: number;              // default 1; must not exceed maxRounds
   first: Debater | "random";
   callTimeoutMs: number;
   totalTimeoutMs: number;
@@ -23,7 +29,8 @@ function runDebate(opts: {
     message: string,
     signal: AbortSignal,
   ) => Promise<{ text: string; reasoning?: string }>;
-  onTurn?: (turn: Turn) => void;   // plugin uses this for progress and logging
+  onTurn?: (turn: Turn) => void;   // completed/rejected turn logging
+  onEvent?: (event: DebateEvent) => void; // progress, retries, validation, stop checks
   signal?: AbortSignal;            // overall cancellation
   random?: () => number;           // injectable for seeded tests; default crypto-backed
   now?: () => number;              // injectable clock for timeout tests
@@ -47,10 +54,15 @@ Loads debate.config.json from a location that follows v2 conventions (document i
 - totalTimeoutMs: 1800000
 - logDir: default ~/.local/share/opencode-debate/debates
 - optional reasoning variant per model, only if session creation supports one
-A hidden agent named debater with ALL tools disabled (including debate itself, every built-in tool, and any MCP or plugin tools). Define it from the plugin if v2 allows that; otherwise propose the change to my global config and wait for approval. Agent prompt:
+The plugin defines a hidden agent named debater through `ctx.agent.transform`, with all tools disabled by default (including debate itself, every built-in tool, and any MCP or plugin tools).
+
+The approved, default-off `readCompatibility` exception exposes only genuine native read for the plugin-owned empty asset, with path/content/symlink/instruction-file guards; see the [permission scope](../README.md#free-only-compatibility-mode). The following prompt descriptions summarize the protocol; the exact current system prompt, tool description, command body, and turn/repair templates live in `src/prompts.ts`.
+
+Agent prompt summary:
+
 You are a debater in a structured two-model debate. You have no tools; reason from your own knowledge and the arguments in front of you. Be specific: give reasoning, evidence, or counterexamples, not vague doubts. The goal is the correct answer, not winning; change your position when shown a better argument, and hold it when you aren't. Write your reasoning in prose, then end every message with exactly one JSON object in the required format, with nothing after it.
 Roles. Pick the Proposer (P) with crypto-backed randomness unless first is set. The other model is the Challenger (C). Record the assignment.
-Sequence. P0 (opening answer), then rounds r = 1..maxRounds. Each round is C_r (critique) followed, if the debate continues, by P_r (response and revision). Stop conditions are checked after every C turn, so the debate always ends on a Challenger turn and the list of unresolved points is always current.
+Sequence. P0 (opening answer), then rounds r = 1..maxRounds. Each round is C_r (critique) followed, if the debate continues, by P_r (response and revision). Stop conditions are checked after every C turn, so normal completion ends on a Challenger turn and the list of unresolved points is current. Convergence and stalemate require `r >= minRounds`; errors, cancellation, and deadlines can stop earlier. P0 counts as the Proposer's first turn, so a minimum of three permits P0/C1/P1/C2/P2/C3 without requiring invented disagreement.
 Turn templates (in src/prompts.ts):
 P0, sent to P:
 QUESTION: {question} {context, if any} You are the PROPOSER. Give your best answer with explicit reasoning. Another model will look hard for flaws in it.
@@ -61,10 +73,9 @@ For every point with status "open", either concede it (status "conceded") and fi
 C_r for r >= 2, sent to C (includes P's latest text):
 For each of your points: if it was conceded, check that the revision actually fixes it (status "resolved") or keep it "open" and explain what's still wrong. If it was defended, either accept the defense (status "withdrawn") or keep it "open" with a specific reply, not a restatement. Add new points, using the next unused ID, only for genuinely new issues that the revision introduced or revealed. Same standard as before: look hard, but don't invent objections.
 Every template ends with a reminder of the required JSON format:
-json
 ```json
 {
-  "answer": "string or null (P: full current answer. C: the answer C would endorse, or null)",
+  "answer": "P: full current answer; C must use JSON null instead of a string",
   "points": [
     { "id": "C1", "summary": "...", "status": "open|conceded|defended|resolved|withdrawn", "note": "..." }
   ],
@@ -72,47 +83,52 @@ json
   "confidence": 0.0
 }
 ```
-Relay only the final text parts to the opponent; never relay reasoning parts. Store the reasoning in the log when it's available.
-Point state. The engine keeps a canonical map of points. C is authoritative for open/resolved/withdrawn, and P is authoritative for conceded/defended. If a P turn fails to address an open point, re-prompt once and list the missing IDs. Ignore any point ID from P that C never raised.
+Relay only the validated reply JSON to the opponent, including the complete answer and point notes; never relay separate reasoning, free-form prose, or rejected attempts. Store full text and available reasoning in the log. All turn and repair prompts carry canonical point state. Paths, line numbers, and supplied review claims do not prove independent source inspection; models must state uncertainty when source excerpts are absent.
+Point state. The engine keeps a canonical map of points. C is authoritative for open/resolved/withdrawn, and P is authoritative for conceded/defended. P0 must return `points: []`. Only C may create IDs, consecutively from C1, with status open. C must return `answer: null` and cannot agree while canonical points remain open. C may explicitly reopen a known resolved/withdrawn point. If a P turn fails to address an open point, re-prompt once and list the missing IDs. Unknown Proposer IDs and invalid role/status combinations enter the single JSON/protocol repair path; rejected replies cannot mutate state or consume IDs. Proposer prompts prohibit creating IDs and never advertise the next unused one.
 Stop conditions (checked after each C turn):
-- converged: C sets agrees_with_current_answer = true AND no points are open.
-- stalemate: from C_2 onward, the set of open point IDs is identical to the previous C turn's.
+- converged: the minimum is met, C sets agrees_with_current_answer = true, AND no points are open.
+- stalemate: the minimum is met and, from C_2 onward, the set of open point IDs is identical to the previous C turn's.
 - max_rounds: C_maxRounds is reached without either of the above.
 - cancelled: I cancelled the tool call.
 - error: unrecoverable failure, including the total deadline (record the reason).
 Final answer = P's latest "answer" (P0's answer if the debate converged at C1).
 - Call timeout: when the per-call deadline fires, retry once in the same session, sending the original message prefixed with "Your previous reply was interrupted before it finished. Reply again in full." A second failure ends the debate with status error and returns everything gathered so far.
-- Unparseable JSON: re-prompt once with "Reply with ONLY the JSON object in the required format." A second failure counts as a call failure.
-- Rate limits (HTTP 429 or the provider's equivalent error): exponential backoff, honoring Retry-After where it's available, up to 3 attempts.
+- Invalid JSON/protocol: re-prompt once with the role, validation error, canonical state, and required format. A second invalid reply ends the turn with a protocol failure. One separate missing-point repair is allowed.
+- Provider retries: rate limits and outages share at most two retries per logical turn. These budgets, and the single timeout retry, remain shared across JSON/protocol and missing-point repairs, allowing at most six dispatched attempts per turn. Backoff starts at one second and doubles; cancellation and the total deadline bound waiting. No retry automatically switches the model or backend.
+- Retry classification: HTTP 429 is retryable; outage wording can classify it as provider unavailable. HTTP 408/500/502/503/504/529 and 520–524 are provider outages. Authentication/configuration failures and other permanent HTTP statuses stop immediately. Statusless envelopes recognize unavailable/overloaded wording, endpoint/service/upstream-unavailable, gateway-timeout/bad-gateway types, and rate-limit wording. Native OpenCode-server network failures and interrupted HTTP-200 bodies feed the same provider retry budget.
+- Retry hints: a valid `Retry-After` header wins over top-level or nested `error.retry_after` body seconds. Retryable HTTP errors without a valid header inspect at most 64 KiB of body with a one-second budget; malformed, oversized, interrupted, or stalled bodies retain the known HTTP classification and use default backoff. Permanent HTTP errors skip body inspection. HTTP-200 error envelopes also support body hints. Error bodies are never echoed into errors/logs. Header parsing accepts padded plain decimal seconds or HTTP-dates; finite delays are clamped to the remaining deadline and timer range.
 - Cancellation: when the tool's execution abort signal fires, abort the engine, which interrupts both child sessions, and return a partial result with status cancelled.
-- Always write the log file, including on error or cancellation.
+- Initialize the required private log before dispatch, and checkpoint errors/cancellation. If initialization fails, return a clear journal error without dispatching a model request. Disk/process failures can prevent a final log.
 - Two child sessions per debate (parentID = the calling session), titled "debate: <slug> | GLM (proposer)" and "debate: <slug> | DeepSeek (challenger)", with the roles filled in to match the actual assignment.
 - Don't delete them afterward; I want to be able to inspect them.
 Report through the execution context's progress mechanism at debate start, before each turn, and at the end. Example: "Round 2/4: DeepSeek (challenger) reviewing the revision."
+Throwing, rejecting, non-Promise, or stalled progress callbacks cannot break the result. Pending progress updates have a one-second wait budget.
 Args (Zod, per v2 conventions):
-- question: string (required)
-- context: string (optional; background material for both debaters)
+- question: trimmed nonempty string (required; at most 100,000 characters)
+- context: string (optional; at most 300,000 characters; background material for both debaters)
+- min_rounds: number (optional, 1 to 8, default 1; must not exceed the effective maximum)
 - max_rounds: number (optional, 1 to 8, default from config)
 - first: "glm", "deepseek", or "random" (optional, default "random")
 - include_transcript: boolean (optional, default false)
-Description (verbatim):
+Original description (extended by the current `TOOL_DESCRIPTION` in `src/prompts.ts` to cover minimum rounds, contribution scores, and incomplete results):
 Run a structured debate between two models (GLM 5.3 Flash and DeepSeek V4.1 Flash) on a question, returning their converged answer or the specific points they still disagree on. Call ONLY when the user explicitly asks for a debate (e.g. "debate this", "use debate", /debate). Never call it on your own initiative. When it returns, present the result as given: the final answer first, then any unresolved points with both sides' positions. Do not add your own verdict on unresolved points or re-argue them unless the user asks.
 Return value: a markdown string.
 ```
 ## Debate result: <converged | stalemate | max_rounds | cancelled | error>
 Proposer: <model> | Challenger: <model> | Rounds: <n>
-### Final answer
+### Final answer             (partial/incomplete on error/cancellation; current on non-convergence)
 <final answer>
-### Unresolved points        (omit if none)
+### Unresolved points        (omit only when converged with none)
 - C2: <summary>. Challenger: <latest position>. Proposer: <latest position>.
 ### Details
 Log: <path to JSON log>. Sessions: <titles/IDs>.
 ```
 If include_transcript is true, append every turn, labeled with model, role, and turn ID.
-JSON log at <logDir>/<ISO timestamp>-<slug>.json. Contents: question, context, config, role assignment, every turn (raw text, parsed JSON, reasoning if available, timings, retries), point-state history, status with reason, and the final result.
+Incomplete results report validated Challenger reviews and the failure code, turn, attempt count, and rejected replies. Empty point state does not establish agreement. Results/logs include the deterministic `retained-phrases-v1` contribution estimate and credited word counts; this measures retained wording and never decides correctness or stop conditions. Error/cancelled outcomes never declare a contribution winner.
+JSON log at <logDir>/<ISO timestamp>-<slug>-<run-suffix>.json. Contents: question, context, config (or configError), arguments, role assignment, limits, every turn/attempt (raw text, parsed JSON, reasoning if available, timings, retries), validationFailures, retryEvents, stopChecks, point-state history, failure metadata, contributions, session/interruption diagnostics, status with reason, and the final result. Logs use mode 0600; newly created log directories use 0700.
 A global custom command named debate, using the v2 directory and format:
 - description: Run a two-model debate on a question
-- body: "Use the debate tool on this question: $ARGUMENTS. Present the result exactly as the tool description instructs."
+- body: generated from `COMMAND_BODY` in `src/prompts.ts`; it requests immediate tool invocation, passing attachments as context and awaiting the callable discovered through Code Mode. The current generated file is `commands/debate.md`. Registration is pinned in Code Mode; child debaters cannot recursively invoke debate.
 Phase 1: core. Engine, parser, prompts, and types, with unit tests using a scripted fake callModel and the injectable clock and random source. Cover:
 - converged at C1
 - converged after revisions

@@ -19,14 +19,17 @@ function redirectFailure(error: unknown): boolean {
 // it are endpoint misbehavior and must be rejected instead of buffered into memory.
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
 /** Bounded body read: a declared or actual oversized body fails before unbounded buffering. */
-async function readBounded(response: Response): Promise<string> {
+async function readBounded(response: Response, maxBytes = MAX_BODY_BYTES, signal?: AbortSignal): Promise<string> {
   const declared = Number(response.headers.get("Content-Length"));
-  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
-    await response.body?.cancel().catch(() => {});
-    throw new DebateError("transport", `OpenAI-compatible endpoint declared an oversized response (> ${MAX_BODY_BYTES} bytes)`);
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    void response.body?.cancel().catch(() => {});
+    throw new DebateError("transport", `OpenAI-compatible endpoint declared an oversized response (> ${maxBytes} bytes)`);
   }
   if (!response.body) return "";
   const reader = response.body.getReader();
+  const cancel = () => { void reader.cancel().catch(() => {}); };
+  signal?.addEventListener("abort", cancel, { once: true });
+  if (signal?.aborted) cancel();
   const decoder = new TextDecoder();
   let text = "", received = 0;
   try {
@@ -34,15 +37,35 @@ async function readBounded(response: Response): Promise<string> {
       const { done, value } = await reader.read();
       if (done) break;
       received += value.byteLength;
-      if (received > MAX_BODY_BYTES) throw new DebateError("transport", `OpenAI-compatible endpoint returned an oversized response (> ${MAX_BODY_BYTES} bytes)`);
+      if (received > maxBytes) throw new DebateError("transport", `OpenAI-compatible endpoint returned an oversized response (> ${maxBytes} bytes)`);
       text += decoder.decode(value, { stream: true });
     }
     text += decoder.decode();
   } catch (error) {
-    void reader.cancel().catch(() => {});
+    cancel();
     throw error;
-  }
+  } finally { signal?.removeEventListener("abort", cancel); }
   return text;
+}
+function bodyRetryAfterMs(body: unknown): number | undefined {
+  if (!body || typeof body !== "object") return;
+  const envelope = body as { retry_after?: unknown; error?: { retry_after?: unknown } | null };
+  const raw = envelope.retry_after ?? envelope.error?.retry_after;
+  const seconds = typeof raw === "number" ? raw
+    : typeof raw === "string" && /^\d+$/.test(raw.trim()) ? Number(raw) : NaN;
+  const milliseconds = seconds * 1000;
+  return Number.isFinite(milliseconds) && milliseconds >= 0 ? milliseconds : undefined;
+}
+/** Retry hints are optional: bounded reads must never mask a known HTTP failure. */
+async function errorBodyRetryAfterMs(response: Response, signal: AbortSignal): Promise<number | undefined> {
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(), 1000);
+  const bounded = AbortSignal.any([signal, timeout.signal]);
+  try {
+    const text = await readBounded(response, 64 * 1024, bounded);
+    return bounded.aborted ? undefined : bodyRetryAfterMs(JSON.parse(text));
+  } catch { return undefined; }
+  finally { clearTimeout(timer); }
 }
 const completionSchema = z.object({
   choices: z.array(z.object({
@@ -96,12 +119,17 @@ export class OpenAICompatibleAdapter implements DebateAdapter {
         });
         // Never include server bodies in error strings: they can echo credentials/headers.
         if (!response.ok) {
-          // Release the error body, but cleanup must never mask the known status or delay its delivery.
-          await response.body?.cancel().catch(() => {});
           const code = providerFailureCode(response.status);
+          let retryAfter = retryAfterMs(response.headers.get("Retry-After"));
+          if (retryAfter === undefined && (code === "rate_limit" || code === "provider_unavailable")) {
+            retryAfter = await errorBodyRetryAfterMs(response, controller.signal);
+          } else {
+            // Headers and permanent statuses need no body; cleanup must not delay classification.
+            void response.body?.cancel().catch(() => {});
+          }
           throw new DebateError(code,
             `OpenAI-compatible request failed (HTTP ${response.status}). ${code === "provider_unavailable" ? "Provider temporarily unavailable." : code === "rate_limit" ? "Provider rate limit reached." : "Check endpoint, credentials, and model configuration."}`,
-            retryAfterMs(response.headers.get("Retry-After")));
+            retryAfter);
         }
         let body: unknown;
         try { body = JSON.parse(await readBounded(response)); }
@@ -111,7 +139,8 @@ export class OpenAICompatibleAdapter implements DebateAdapter {
           // mid-read (connection dropped after HTTP 200) is a transient network failure.
           if (error instanceof DebateError) throw error;
           if (error instanceof SyntaxError) throw new DebateError("transport", "OpenAI-compatible endpoint returned invalid JSON");
-          throw new DebateError("provider_unavailable", "OpenAI-compatible response body was interrupted. Check endpoint connectivity.");
+          throw new DebateError("provider_unavailable", "OpenAI-compatible response body was interrupted. Check endpoint connectivity.",
+            retryAfterMs(response.headers.get("Retry-After")));
         }
         if (controller.signal.aborted) throw abortReason(controller.signal);
         // Some compatible providers report an error in an HTTP 200 envelope; older ones use a bare string.
@@ -122,8 +151,10 @@ export class OpenAICompatibleAdapter implements DebateAdapter {
           const type = [error?.code, error?.type].filter(v => typeof v === "string").join(".");
           // The message is used only to pick a retry classification; it is never surfaced or logged.
           const message = typeof error?.message === "string" ? error.message : "";
+          // Many compatible providers carry the retry delay in the error body instead of the header;
+          // an explicit Retry-After header still wins.
           throw new DebateError(providerFailureCode(status, type, message), "OpenAI-compatible provider returned an error envelope",
-            retryAfterMs(response.headers.get("Retry-After")));
+            retryAfterMs(response.headers.get("Retry-After")) ?? bodyRetryAfterMs(body));
         }
         const parsed = completionSchema.safeParse(body);
         if (!parsed.success) throw new DebateError("transport", "OpenAI-compatible endpoint returned no complete, untruncated assistant text answer (tool calls and refusals are unsupported)");

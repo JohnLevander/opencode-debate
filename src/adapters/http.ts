@@ -4,7 +4,7 @@ import type { DebateErrorCode } from "../core/types.ts";
 // No fixed subject list: any unavailable/overloaded wording counts where wording is authoritative
 // (statusless envelopes and HTTP 429). Concrete statuses outrank wording everywhere else.
 const OUTAGE_MESSAGE = /\b(?:temporarily\s+|currently\s+)?(?:unavailable|overloaded)\b/i;
-const OUTAGE_TYPE = /(?:^|[._-])(?:service[_-]unavailable|server[_-]error|overloaded(?:[_-]error)?)$/;
+const OUTAGE_TYPE = /(?:^|[._-])(?:(?:endpoint|service|upstream)[_-]unavailable|server[_-]error|overloaded(?:[_-]error)?|gateway[_-]?timeout|bad[_-]?gateway)$/;
 const RATE_LIMIT_TYPE = /rate.?limit|too[_ -]?many[_ -]?requests/i;
 // Deliberate-list transient statuses: standard server/gateway failures, Anthropic 529 overload,
 // and Cloudflare 520-524 origin failures. Other 5xx (501/505/507...) are permanent by design.
@@ -24,11 +24,12 @@ export function providerFailureCode(status?: number, type = "", message = ""): D
   // Beyond 4xx (e.g. 501), an explicit rate-limit type still wins; statusless envelopes classify by wording alone.
   if (status !== undefined) return RATE_LIMIT_TYPE.test(type) ? "rate_limit" : "transport";
   return OUTAGE_MESSAGE.test(message) || OUTAGE_TYPE.test(type) ? "provider_unavailable"
-    : RATE_LIMIT_TYPE.test(type) ? "rate_limit" : "transport";
+    : RATE_LIMIT_TYPE.test(type) || RATE_LIMIT_TYPE.test(message) ? "rate_limit" : "transport";
 }
 
 export function retryAfterMs(value: string | null, now = Date.now()): number | undefined {
   if (!value) return;
+  value = value.trim(); // tolerate obs-fold/whitespace padding around the field value
   // RFC 9110 allows only plain decimal seconds (or an HTTP-date); reject hex, exponents,
   // signs, and whitespace, whose numeric coercion would invent huge or bogus delays.
   if (/^\d+$/.test(value)) { const milliseconds = Number(value) * 1000; return Number.isFinite(milliseconds) ? milliseconds : undefined; }

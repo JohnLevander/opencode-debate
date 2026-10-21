@@ -1,6 +1,6 @@
 # opencode-debate — Phase 0 findings and implementation proposal
 
-Investigated on October 20, 2026. **Phase 0 only: no debate implementation or OpenCode configuration changes.**
+Investigated on October 20, 2026. **Historical Phase 0 snapshot:** no debate implementation or OpenCode configuration changes had occurred at that point. Later observations appear as addenda below. For current implementation, permissions, logging, and completed phases, use [README.md](../README.md), [SPEC.md](SPEC.md), and [PHASES.md](PHASES.md); they supersede the initial implementation proposals in this document.
 
 Repository requested and confirmed by the user: `~/dev/opencode-debate`, resolving to `/Volumes/Samsung-Ext/dev/opencode-debate`. The originally attached empty `dev/me/openchamber-debater` directory is not the target repository.
 
@@ -282,3 +282,9 @@ The installed server can normalize an omitted reasoning variant to `"default"`; 
 OpenCode 2.0.32 partitions registered tools: `codemode: false` tools are advertised directly and excluded from Code Mode's runtime/search inventory. An empty Code Mode search therefore does not prove a direct tool is unloaded. The user reproduced this confusion in a build session whose project reported opencode-debate active. The plugin now registers `options: { codemode: true, pinned: true }`. The installed `@opencode/schema` tool options support both fields; pinning retains the signature in the inline catalog even when its normal budget is exhausted. The command still requires explicit user invocation.
 
 Sources: pinned-version [tool snapshot](https://github.com/anomalyco/opencode/blob/v2.0.32/packages/core/src/tool.ts), [Code Mode runtime](https://github.com/anomalyco/opencode/blob/v2.0.32/packages/core/src/codemode/tool.ts), and [catalog selection](https://github.com/anomalyco/opencode/blob/v2.0.32/packages/core/src/codemode/catalog.ts). An isolated 2.0.32 server loaded the changed plugin; a context hook recorded the registered options, an advertised execute tool, and a debate signature in the assembled catalog instructions, then deliberately stopped before inference. This verifies catalog exposure, not a new live-model debate.
+
+## Current implementation cross-reference — 2026-10-21
+
+All four implementation phases are complete. The approved opt-in restricted-read mode enabled actual free-model IEEE convergence through OpenChamber; strict no-tools mode still has the recorded free-tier rejection. Successful contested multi-round live execution and production fallback inference remain unverified. The [integration report](INTEGRATION.md) preserves that evidence and its limits.
+
+The original mutual-acceptance/hash stop proposal, opt-in transcript logging, deterministic invocation-marker proposal, and proposed file layout were superseded. The engine uses Challenger endorsement and repeated open-ID sets, with optional minimum rounds; it logs full text and available reasoning privately, relays only validated JSON, and registers a pinned Code Mode tool plus generated Markdown command. Natural-language invocation consent remains an instruction to the caller, while recursive debater invocation is rejected. Current HTTP status/error-envelope classification, bounded retry-body reads, header/body hints, and regression coverage are documented in the [retry guarantees](../README.md#protocol-and-retry-guarantees).

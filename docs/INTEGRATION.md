@@ -1,5 +1,7 @@
 # Phase 3 integration results
 
+Current status, 2026-10-21: this document preserves chronological live-test evidence. The initial strict no-tools trials failed; the later [approved restricted-read experiment](#approved-restricted-read-compatibility-experiment--2026-10-20-evening-americanew_york) achieved free-model IEEE convergence through the installed tool. The optional fallback is implemented and mock-tested, and compatibility mode was subsequently approved for global activation; see [phase reports](PHASES.md). Earlier approval boundaries and test counts below describe those milestones, not pending work.
+
 Tested 2026-10-20 with OpenCode 2.0.32 and the installed OpenChamber front end. The approved global plugin and command symlinks point to this repository. Global `opencode.json(c)` and agent files were not edited. Both free model IDs were available in the server inventory.
 
 ## Outcome
@@ -91,3 +93,9 @@ The free models produced P0 and C1, so the original auth blocker was absent. C1 
 The caller displayed the partial answer and unresolved points. This exposes a remaining free-model output/role adherence limitation, distinct from transport authentication. The protocol did not silently accept missing answers or let Proposer output close Challenger objections. No prompt-policy change or retry-budget expansion was made just to force a successful outcome.
 
 After testing, both ignored test fixture `.opencode` directories were renamed `.opencode-disabled` to stop loading their local audit plugins/config on future activation. Logs and sessions are retained. The actual acceptance caller and both IEEE child sessions reported `cost: 0` and the expected free model IDs. The global compatibility flag remains off pending the user's approval of the exact config merge.
+
+## Automated verification update — 2026-10-21
+
+The current source passes TypeScript and all 228 automated tests. Coverage now includes statusless outage/rate-limit classification, permanent-status precedence, Retry-After whitespace/header handling, nested/top-level body retry hints on HTTP-200 envelopes and HTTP 429/503, engine backoff/history isolation, and malformed/oversized/interrupted/stalled error bodies. Optional retryable-error body reads are bounded to 64 KiB and one second; valid headers win, and permanent errors skip inspection. Progress callback failures/non-Promise returns, native initialization/idle errors, interrupt diagnostics, journal failures, argument/configuration guards, and concurrent tool execution also have regression coverage.
+
+This is local automated evidence; no new live-model run, provider availability check, paid inference, or OpenChamber restart was performed for the hardening changes. Historical live-test outcomes and limits above remain unchanged.

@@ -21,10 +21,10 @@ function config(baseURL: string) {
 const reply = (agrees: boolean) => JSON.stringify({ answer: agrees ? null : "A tested answer", points: [], agrees_with_current_answer: agrees, confidence: 0.9 });
 const signal = () => new AbortController().signal;
 // A real Response whose body stream fails mid-transfer, as when a socket drops after headers arrive.
-function interruptedBody(status: number) {
+function interruptedBody(status: number, retryAfter?: string) {
   return new Response(new ReadableStream({
     start(controller) { controller.enqueue(new TextEncoder().encode('{"choices":')); controller.error(new TypeError("read ECONNRESET")); },
-  }), { status, headers: { "Content-Type": "application/json" } });
+  }), { status, headers: { "Content-Type": "application/json", ...(retryAfter ? { "Retry-After": retryAfter } : {}) } });
 }
 
 test("fallback sends authenticated tool-free requests and isolates per-model text history", async t => {
@@ -442,4 +442,212 @@ test("debate receiving HTTP 401 with an errored body dispatches once and schedul
   assert.equal(events.filter(e => e.type === "retry").length, 0);
   assert.equal(r.failure?.code, "transport"); assert.equal(r.turns[0].attempts.length, 1);
   assert.match(r.reason, /HTTP 401/);
+});
+
+function splitBodyContaining(multibyte: string, cutOffset: number) {
+  const json = JSON.stringify(completion(multibyte));
+  const cut = json.indexOf(multibyte) + cutOffset; // the JSON prefix is ASCII, so char offset == byte offset
+  const bytes = new TextEncoder().encode(json);
+  return new Response(new ReadableStream({
+    start(controller) { controller.enqueue(bytes.slice(0, cut)); controller.enqueue(bytes.slice(cut)); controller.close(); },
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+}
+for (const [label, multibyte, cut] of [["2+2", "😀", 2], ["1+3", "😀", 1], ["after-CJK into emoji", "汉😀", 4]] as const) {
+  test(`multi-byte characters split across body chunks reassemble exactly (${label})`, async () => {
+    const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+      (async () => splitBodyContaining(multibyte, cut)) as typeof fetch);
+    try { assert.equal((await adapter.callModel("glm", "question", signal())).text, multibyte); }
+    finally { adapter.release(); }
+  });
+}
+
+test("string envelopes with rate-limit wording classify as rate_limit", async () => {
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => Response.json({ error: "Rate limit exceeded. Retry in 3 seconds." })) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), e => e instanceof DebateError && e.code === "rate_limit");
+  } finally { adapter.release(); }
+});
+test("object envelopes with rate-limit message wording classify as rate_limit", async () => {
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => Response.json({ error: { message: "Too many requests for this model" } })) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), e => e instanceof DebateError && e.code === "rate_limit");
+  } finally { adapter.release(); }
+});
+test("endpoint_unavailable envelope type classifies as provider_unavailable", async () => {
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => Response.json({ error: { type: "endpoint_unavailable", message: "provider detail" } })) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), e => e instanceof DebateError && e.code === "provider_unavailable");
+  } finally { adapter.release(); }
+});
+test("gateway_timeout envelope type classifies as provider_unavailable", async () => {
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => Response.json({ error: { type: "gateway_timeout", message: "provider detail" } })) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), e => e instanceof DebateError && e.code === "provider_unavailable");
+  } finally { adapter.release(); }
+});
+test("error-body retry_after seconds produce a retry hint", async () => {
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => Response.json({ error: { code: "429", retry_after: 3 } })) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), e => e instanceof DebateError && e.code === "rate_limit" && e.retryAfterMs === 3000);
+  } finally { adapter.release(); }
+});
+test("string retry_after seconds produce a retry hint", async () => {
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => Response.json({ error: { code: "429", retry_after: "3" } })) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), e => e instanceof DebateError && e.retryAfterMs === 3000);
+  } finally { adapter.release(); }
+});
+test("top-level retry_after seconds produce a retry hint for outage envelopes", async () => {
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => Response.json({ retry_after: 3, error: { code: "529", message: "The API is temporarily overloaded" } })) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), e => e instanceof DebateError && e.code === "provider_unavailable" && e.retryAfterMs === 3000);
+  } finally { adapter.release(); }
+});
+test("top-level retry_after beside a statusless outage type produces the hint", async () => {
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => Response.json({ retry_after: 3, error: { type: "service_unavailable" } })) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), e => e instanceof DebateError && e.code === "provider_unavailable" && e.retryAfterMs === 3000);
+  } finally { adapter.release(); }
+});
+test("body retry hints feed the engine backoff for rate limits", { timeout: 8000 }, async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => Response.json({ error: { code: "429", retry_after: 3 } })) as typeof fetch);
+  t.after(() => adapter.release());
+  const events: any[] = [];
+  const result = runDebate({ question: "test", maxRounds: 1, first: "glm", callTimeoutMs: 2000, totalTimeoutMs: 30_000, callModel: adapter.callModel, onEvent: e => events.push(e) });
+  for (let i = 0; i < 40; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(250); }
+  const r = await result;
+  assert.equal(r.status, "error");
+  assert.deepEqual(events.filter(e => e.type === "retry").map(e => e.delayMs), [3000, 3000]);
+});
+test("body retry hints feed the engine backoff for outages", { timeout: 8000 }, async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => Response.json({ retry_after: 3, error: { code: "529" } })) as typeof fetch);
+  t.after(() => adapter.release());
+  const events: any[] = [];
+  const result = runDebate({ question: "test", maxRounds: 1, first: "glm", callTimeoutMs: 2000, totalTimeoutMs: 30_000, callModel: adapter.callModel, onEvent: e => events.push(e) });
+  for (let i = 0; i < 40; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(250); }
+  const r = await result;
+  assert.equal(r.status, "error");
+  assert.deepEqual(events.filter(e => e.type === "retry").map(e => [e.reason, e.delayMs]), [["provider_unavailable", 3000], ["provider_unavailable", 3000]]);
+});
+test("an explicit Retry-After header outranks a body retry hint", async () => {
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => new Response(JSON.stringify({ error: { code: "429", retry_after: 9 } }), { status: 200, headers: { "Content-Type": "application/json", "Retry-After": "2" } })) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), e => e instanceof DebateError && e.retryAfterMs === 2000);
+  } finally { adapter.release(); }
+});
+test("an interrupted body keeps the response Retry-After hint", async () => {
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => interruptedBody(200, "3")) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), e => e instanceof DebateError && e.code === "provider_unavailable" && e.retryAfterMs === 3000);
+  } finally { adapter.release(); }
+});
+test("interrupted-body header hints feed the engine backoff", { timeout: 8000 }, async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => interruptedBody(200, "3")) as typeof fetch);
+  t.after(() => adapter.release());
+  const events: any[] = [];
+  const result = runDebate({ question: "test", maxRounds: 1, first: "glm", callTimeoutMs: 2000, totalTimeoutMs: 30_000, callModel: adapter.callModel, onEvent: e => events.push(e) });
+  for (let i = 0; i < 40; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(250); }
+  const r = await result;
+  assert.equal(r.status, "error");
+  assert.deepEqual(events.filter(e => e.type === "retry").map(e => e.delayMs), [3000, 3000]);
+});
+
+for (const status of [429, 503]) {
+  const expected = status === 429 ? "rate_limit" : "provider_unavailable";
+  test(`HTTP ${status} honors nested and top-level body retry hints`, async () => {
+    for (const body of [{ error: { retry_after: "3", message: key } }, { retry_after: 3, error: { message: key } }]) {
+      const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+        (async () => Response.json(body, { status })) as typeof fetch);
+      try {
+        await assert.rejects(adapter.callModel("glm", "question", signal()), error => {
+          assert.ok(error instanceof DebateError); assert.equal(error.code, expected);
+          assert.equal(error.retryAfterMs, 3000); assert.match(error.message, new RegExp(`HTTP ${status}`));
+          assert.ok(!error.message.includes(key)); return true;
+        });
+      } finally { adapter.release(); }
+    }
+  });
+  test(`HTTP ${status} body hints drive engine backoff without polluting history`, async t => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const requests: unknown[] = [];
+    const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+      (async (_url, init) => {
+        requests.push(JSON.parse(init!.body as string));
+        return requests.length === 1 ? Response.json({ error: { retry_after: 3 } }, { status })
+          : Response.json(completion(reply(requests.length === 3)));
+      }) as typeof fetch);
+    t.after(() => adapter.release());
+    const events: any[] = [];
+    const result = runDebate({ question: "test", maxRounds: 1, first: "glm", callTimeoutMs: 2000, totalTimeoutMs: 30_000,
+      callModel: adapter.callModel, onEvent: e => events.push(e) });
+    for (let i = 0; i < 40; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(250); }
+    assert.equal((await result).status, "converged"); assert.equal(requests.length, 3);
+    assert.deepEqual(requests[1], requests[0]);
+    assert.deepEqual(events.filter(e => e.type === "retry").map(e => [e.reason, e.delayMs]), [[expected, 3000]]);
+  });
+  test(`HTTP ${status} retains its classification when its error body cannot be parsed`, async () => {
+    for (const body of [new Response("not JSON", { status }), interruptedBody(status),
+      new Response("x".repeat(64 * 1024 + 1), { status }),
+      new Response("", { status, headers: { "Content-Length": "65537" } })]) {
+      const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+        (async () => body) as typeof fetch);
+      try {
+        await assert.rejects(adapter.callModel("glm", "question", signal()), error => {
+          assert.ok(error instanceof DebateError); assert.equal(error.code, expected);
+          assert.equal(error.retryAfterMs, undefined); assert.match(error.message, new RegExp(`HTTP ${status}`)); return true;
+        });
+      } finally { adapter.release(); }
+    }
+  });
+}
+
+test("HTTP error headers outrank body hints, including a zero-second hint", async () => {
+  for (const status of [429, 503]) for (const hint of ["0", "2"]) {
+    const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+      (async () => Response.json({ error: { retry_after: 9 } }, { status, headers: { "Retry-After": hint } })) as typeof fetch);
+    try {
+      await assert.rejects(adapter.callModel("glm", "question", signal()), error =>
+        error instanceof DebateError && error.retryAfterMs === Number(hint) * 1000);
+    } finally { adapter.release(); }
+  }
+});
+
+test("a stalled HTTP error body is cancelled after the hint-read budget without masking its status", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let cancelled = false;
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => new Response(new ReadableStream({ cancel() { cancelled = true; return new Promise(() => {}); } }), { status: 503 })) as typeof fetch);
+  t.after(() => adapter.release());
+  const result = assert.rejects(adapter.callModel("glm", "question", signal()), error =>
+    error instanceof DebateError && error.code === "provider_unavailable" && /HTTP 503/.test(error.message));
+  await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(1000);
+  await result; assert.equal(cancelled, true);
+});
+
+test("permanent HTTP errors skip stalled bodies and ignore misleading body retry hints", async () => {
+  for (const response of [Response.json({ retry_after: 9, error: { code: "429", type: "service_unavailable" } }, { status: 404 }),
+    new Response(new ReadableStream({ cancel() { return new Promise(() => {}); } }), { status: 401 })]) {
+    const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+      (async () => response) as typeof fetch);
+    try {
+      await assert.rejects(adapter.callModel("glm", "question", signal()), error =>
+        error instanceof DebateError && error.code === "transport" && error.retryAfterMs === undefined);
+    } finally { adapter.release(); }
+  }
 });

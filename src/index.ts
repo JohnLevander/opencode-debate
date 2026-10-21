@@ -45,8 +45,8 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<void>(resolve => { timer = setTimeout(resolve, 1000); timer.unref(); });
     let update: Promise<void>;
-    try { update = execution.progress({ title: "Debate", description: message, status: message }); }
-    catch { update = Promise.resolve(); } // a throwing host callback must not break the tool
+    try { update = Promise.resolve(execution.progress({ title: "Debate", description: message, status: message })); }
+    catch { update = Promise.resolve(); } // a throwing or non-promise host callback must not break the tool
     const task = Promise.race([update.then(() => {}, () => {}).finally(() => clearTimeout(timer)), timeout]);
     pendingWrites.push(task);
   };

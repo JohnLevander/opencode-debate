@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import plugin, { executeDebate, debateArgs } from "../src/index.ts";
+import plugin, { executeDebate, debateArgs, type DebateShared } from "../src/index.ts";
 import { DEBATER_SYSTEM, TOOL_DESCRIPTION, COMMAND_BODY, COMMAND_DESCRIPTION } from "../src/prompts.ts";
 import { defaults, loadConfig } from "../src/config.ts";
 import { DebateLog } from "../src/log.ts";
@@ -178,3 +178,220 @@ test("invalid Challenger statuses are logged twice and the partial result cannot
   assert.match(output, /Partial answer \(debate incomplete\)/); assert.match(output, /does not establish agreement/);
   assert.ok(!output.includes("### Final answer"));
 });
+
+function debating() {
+  const fake = fakeClient();
+  const original = fake.raw.session.prompt;
+  fake.raw.session.prompt = async (input: any) => {
+    const admitted = await original(input);
+    const message = fake.messages.get(input.sessionID)!.at(-1);
+    message.content[0].text = JSON.stringify({ answer: input.sessionID === "child-0" ? "A valid final answer" : null, points: [], agrees_with_current_answer: fake.prompts.length > 1, confidence: 0.9 });
+    message.content.splice(1, 1);
+    return admitted;
+  };
+  return fake;
+}
+const executionOf = (agent: string, progress: () => Promise<void> = async () => {}) =>
+  ({ sessionID: "parent", agent, signal: new AbortController().signal, progress });
+const shared = (): DebateShared => ({ owned: new Set(), retryHints: new Map(), restrictedReads: new Map() });
+const ctxOf = (fake: ReturnType<typeof fakeClient>, root: string) =>
+  ({ ...fake.client, location: { directory: root, project: { directory: root } }, app: { version: "2.0.32" } }) as unknown as Plugin.Context;
+async function withLogDir<T>(fn: (root: string) => Promise<T>): Promise<T> {
+  const root = await directory();
+  const previous = process.env.OPENCODE_DEBATE_LOG_DIR, previousConfig = process.env.XDG_CONFIG_HOME;
+  process.env.OPENCODE_DEBATE_LOG_DIR = root; process.env.XDG_CONFIG_HOME = path.join(root, "no-global-config");
+  try { return await fn(root); }
+  finally {
+    if (previous === undefined) delete process.env.OPENCODE_DEBATE_LOG_DIR; else process.env.OPENCODE_DEBATE_LOG_DIR = previous;
+    if (previousConfig === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = previousConfig;
+  }
+}
+
+test("a debater agent cannot invoke the debate tool", async () => withLogDir(async root => {
+  const fake = fakeClient();
+  const output = await executeDebate(ctxOf(fake, root), { question: "test", first: "glm" }, executionOf("debater"), shared());
+  assert.match(output, /Debate result: error/); assert.match(output, /A debater cannot invoke the debate tool/);
+  assert.equal(fake.created.length, 0); assert.equal(fake.prompts.length, 0);
+}));
+test("the debater-invocation guard still journals the failure", async () => withLogDir(async root => {
+  const fake = fakeClient();
+  await executeDebate(ctxOf(fake, root), { question: "test", first: "glm" }, executionOf("debater"), shared());
+  const log = JSON.parse(await readFile(path.join(root, (await readdir(root))[0]), "utf8"));
+  assert.equal(log.status, "error"); assert.match(log.reason, /cannot invoke/); assert.equal(log.sessions.length, 0);
+}));
+test("a parent agent runs the identical setup to convergence", async () => withLogDir(async root => {
+  const output = await executeDebate(ctxOf(debating(), root), { question: "test", first: "glm" }, executionOf("build"), shared());
+  assert.match(output, /Debate result: converged/);
+}));
+
+for (const [name, poison] of [["__proto__", '{"__proto__": {"defaultMaxRounds": 9}}'], ["constructor", '{"constructor": {"prototype": {}}}'], ["nested model", '{"models": {"glm": {"prototype": 1}}}']] as const) {
+  test(`configuration files cannot poison prototypes via ${name} keys`, async () => {
+    const root = await directory(); const dir = path.join(root, ".opencode"); await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "debate.config.json"), poison);
+    await assert.rejects(loadConfig(root, root, { XDG_CONFIG_HOME: path.join(root, "none") }), /Invalid configuration key/);
+    assert.equal(({} as any).defaultMaxRounds, undefined);
+  });
+}
+
+function hookHarness(root: string) {
+  const fake = fakeClient();
+  const hooks: Record<string, Function> = {}; let tool: any;
+  const ctx = {
+    ...fake.client,
+    agent: { list: async () => ({ data: [] }), transform: async (fn: Function) => fn({ update: (_id: string, update: Function) => update({}) }) },
+    session: { ...fake.raw.session, hook: async (name: string, fn: Function) => { hooks[name] = fn; } },
+    tool: { hook: async (name: string, fn: Function) => { hooks[`tool.${name}`] = fn; }, transform: async (fn: Function) => fn({ add: (v: any) => { tool = v; } }) },
+    location: { directory: root, project: { directory: root } }, app: { version: "2.0.32" },
+  } as unknown as Plugin.Context;
+  return { fake, hooks, ctx, tool: () => tool };
+}
+test("the http.response hook feeds captured Retry-After hints into native retries", { timeout: 15000 }, async () => withLogDir(async root => {
+  const { fake, hooks, ctx, tool } = hookHarness(root);
+  await plugin.setup(ctx);
+  fake.change({
+    assistantError: { type: "provider.rate-limit", message: "Quota exceeded", status: 429 }, outcome: "failed",
+    onPrompt: () => { hooks["http.response"]({ agent: "debater", sessionID: "child-0", response: { status: 429, headers: new Headers({ "Retry-After": "2" }) } }); },
+  });
+  await tool().execute({ question: "test", first: "glm" }, { sessionID: "parent", agent: "build", signal: new AbortController().signal, progress: async () => {} });
+  const log = JSON.parse(await readFile(path.join(root, (await readdir(root))[0]), "utf8"));
+  assert.deepEqual(log.retryEvents.map((e: any) => e.delayMs), [2000, 2000]);
+}));
+test("the http.response hook ignores hints on permanent statuses", async () => withLogDir(async root => {
+  const { fake, hooks, ctx, tool } = hookHarness(root);
+  await plugin.setup(ctx);
+  fake.change({
+    assistantError: { type: "provider.error", message: "Model not found", status: 404 }, outcome: "failed",
+    onPrompt: () => { hooks["http.response"]({ agent: "debater", sessionID: "child-0", response: { status: 404, headers: new Headers({ "Retry-After": "9" }) } }); },
+  });
+  await tool().execute({ question: "test", first: "glm" }, { sessionID: "parent", agent: "build", signal: new AbortController().signal, progress: async () => {} });
+  const log = JSON.parse(await readFile(path.join(root, (await readdir(root))[0]), "utf8"));
+  assert.equal(log.status, "error"); assert.deepEqual(log.retryEvents, []); assert.equal(log.turns[0].attempts.length, 1);
+}));
+test("the http.response hook ignores junk headers and unrelated sessions", { timeout: 15000 }, async () => withLogDir(async root => {
+  const { fake, hooks, ctx, tool } = hookHarness(root);
+  await plugin.setup(ctx);
+  fake.change({
+    assistantError: { type: "provider.rate-limit", message: "Quota exceeded", status: 429 }, outcome: "failed",
+    onPrompt: () => {
+      hooks["http.response"]({ agent: "debater", sessionID: "child-0", response: { status: 429, headers: new Headers({ "Retry-After": "soon" }) } });
+      hooks["http.response"]({ agent: "build", sessionID: "unrelated", response: { status: 429, headers: new Headers({ "Retry-After": "7" }) } });
+    },
+  });
+  await tool().execute({ question: "test", first: "glm" }, { sessionID: "parent", agent: "build", signal: new AbortController().signal, progress: async () => {} });
+  const log = JSON.parse(await readFile(path.join(root, (await readdir(root))[0]), "utf8"));
+  assert.deepEqual(log.retryEvents.map((e: any) => e.delayMs), [1000, 2000]);
+}));
+
+test("an unwritable log directory returns the journal failure without throwing", async t => {
+  const root = await directory(); const blocker = path.join(root, "blocker");
+  await writeFile(blocker, "x");
+  const previous = process.env.OPENCODE_DEBATE_LOG_DIR, previousConfig = process.env.XDG_CONFIG_HOME;
+  process.env.OPENCODE_DEBATE_LOG_DIR = blocker; process.env.XDG_CONFIG_HOME = path.join(root, "none");
+  t.after(() => {
+    if (previous === undefined) delete process.env.OPENCODE_DEBATE_LOG_DIR; else process.env.OPENCODE_DEBATE_LOG_DIR = previous;
+    if (previousConfig === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = previousConfig;
+  });
+  const fake = fakeClient();
+  const output = await executeDebate(ctxOf(fake, root), { question: "test", first: "glm" }, executionOf("build"), shared());
+  assert.match(output, /Debate result: error/); assert.match(output, /Cannot create the required debate log/); assert.ok(output.includes(blocker));
+});
+test("a journal-init failure creates no log file and dispatches nothing", async t => {
+  const root = await directory(); const blocker = path.join(root, "blocker");
+  await writeFile(blocker, "x");
+  const previous = process.env.OPENCODE_DEBATE_LOG_DIR, previousConfig = process.env.XDG_CONFIG_HOME;
+  process.env.OPENCODE_DEBATE_LOG_DIR = blocker; process.env.XDG_CONFIG_HOME = path.join(root, "none");
+  t.after(() => {
+    if (previous === undefined) delete process.env.OPENCODE_DEBATE_LOG_DIR; else process.env.OPENCODE_DEBATE_LOG_DIR = previous;
+    if (previousConfig === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = previousConfig;
+  });
+  const fake = fakeClient();
+  const output = await executeDebate(ctxOf(fake, root), { question: "test", first: "glm" }, executionOf("build"), shared());
+  assert.deepEqual(await readdir(root), ["blocker"]);
+  assert.equal(fake.created.length, 0); assert.equal(fake.prompts.length, 0);
+  assert.match(output, /No answer was gathered/);
+});
+
+test("oversized questions are rejected before the tool runs", async () => {
+  await assert.rejects(executeDebate({} as any, { question: "q".repeat(100_001), first: "glm" }, executionOf("build"), shared()), /question/);
+});
+test("oversized contexts are rejected before the tool runs", async () => {
+  await assert.rejects(executeDebate({} as any, { question: "test", context: "c".repeat(300_001), first: "glm" }, executionOf("build"), shared()), /context/);
+});
+test("the exact argument bounds are accepted", () => {
+  assert.equal(debateArgs.safeParse({ question: "q".repeat(100_000), context: "c".repeat(300_000) }).success, true);
+});
+
+test("a hanging progress callback cannot stall the debate", { timeout: 5000 }, async () => withLogDir(async root => {
+  const output = await executeDebate(ctxOf(debating(), root), { question: "test", first: "glm" }, executionOf("build", () => new Promise(() => {})), shared());
+  assert.match(output, /Debate result: converged/);
+}));
+test("a progress callback that hangs once then recovers is tolerated", { timeout: 5000 }, async () => withLogDir(async root => {
+  let calls = 0;
+  const progress = async () => { if (++calls === 1) await new Promise(() => {}); };
+  const output = await executeDebate(ctxOf(debating(), root), { question: "test", first: "glm" }, executionOf("build", progress), shared());
+  assert.match(output, /Debate result: converged/);
+}));
+test("an async-rejecting progress callback is tolerated", async () => withLogDir(async root => {
+  const progress = async () => { throw new Error("async host bug"); };
+  const output = await executeDebate(ctxOf(debating(), root), { question: "test", first: "glm" }, executionOf("build", progress), shared());
+  assert.match(output, /Debate result: converged/);
+}));
+
+test("two concurrent debates with shared plugin state complete independently", { timeout: 8000 }, async () => withLogDir(async root => {
+  const state = shared();
+  const outputs = await Promise.all([
+    executeDebate(ctxOf(debating(), root), { question: "alpha", first: "glm" }, executionOf("build"), state),
+    executeDebate(ctxOf(debating(), root), { question: "beta", first: "glm" }, executionOf("build"), state),
+  ]);
+  for (const output of outputs) assert.match(output, /Debate result: converged/);
+  assert.equal((await readdir(root)).length, 2); assert.equal(state.owned.size, 0);
+}));
+test("a failing debate does not disturb a concurrent healthy one", { timeout: 8000 }, async () => withLogDir(async root => {
+  const bad = fakeClient(); bad.raw.model.list = async () => ({ data: [] });
+  const outputs = await Promise.all([
+    executeDebate(ctxOf(bad, root), { question: "gamma", first: "glm" }, executionOf("build"), shared()),
+    executeDebate(ctxOf(debating(), root), { question: "delta", first: "glm" }, executionOf("build"), shared()),
+  ]);
+  assert.match(outputs[0], /Debate result: error/); assert.match(outputs[1], /Debate result: converged/);
+  assert.equal((await readdir(root)).length, 2);
+}));
+test("concurrent failing debates still write independent journals", { timeout: 8000 }, async () => withLogDir(async root => {
+  const bad = () => { const f = fakeClient(); f.raw.model.list = async () => ({ data: [] }); return f; };
+  const outputs = await Promise.all([
+    executeDebate(ctxOf(bad(), root), { question: "eps", first: "glm" }, executionOf("build"), shared()),
+    executeDebate(ctxOf(bad(), root), { question: "zeta", first: "glm" }, executionOf("build"), shared()),
+  ]);
+  for (const output of outputs) assert.match(output, /Debate result: error/);
+  assert.equal((await readdir(root)).length, 2);
+}));
+
+test("a debate runs normally once the log directory becomes writable", async t => {
+  const root = await directory(); const blocker = path.join(root, "blocker");
+  await writeFile(blocker, "x");
+  const previous = process.env.OPENCODE_DEBATE_LOG_DIR, previousConfig = process.env.XDG_CONFIG_HOME;
+  process.env.OPENCODE_DEBATE_LOG_DIR = blocker; process.env.XDG_CONFIG_HOME = path.join(root, "none");
+  t.after(() => {
+    if (previous === undefined) delete process.env.OPENCODE_DEBATE_LOG_DIR; else process.env.OPENCODE_DEBATE_LOG_DIR = previous;
+    if (previousConfig === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = previousConfig;
+  });
+  const failed = await executeDebate(ctxOf(fakeClient(), root), { question: "test", first: "glm" }, executionOf("build"), shared());
+  assert.match(failed, /Cannot create the required debate log/);
+  process.env.OPENCODE_DEBATE_LOG_DIR = root;
+  const output = await executeDebate(ctxOf(debating(), root), { question: "test", first: "glm" }, executionOf("build"), shared());
+  assert.match(output, /Debate result: converged/);
+  const files = await readdir(root);
+  assert.equal(files.length, 2); assert.ok(files.some(f => f.endsWith(".json")));
+});
+
+test("a progress callback returning undefined cannot break the result", async () => withLogDir(async root => {
+  const output = await executeDebate(ctxOf(debating(), root), { question: "test", first: "glm" }, executionOf("build", (() => undefined) as unknown as () => Promise<void>), shared());
+  assert.match(output, /Debate result: converged/);
+}));
+test("a progress callback returning a non-thenable object cannot break the result", async () => withLogDir(async root => {
+  const output = await executeDebate(ctxOf(debating(), root), { question: "test", first: "glm" }, executionOf("build", (() => ({ stranded: true })) as unknown as () => Promise<void>), shared());
+  assert.match(output, /Debate result: converged/);
+}));
+test("a progress callback returning a plain string cannot break the result", async () => withLogDir(async root => {
+  const output = await executeDebate(ctxOf(debating(), root), { question: "test", first: "glm" }, executionOf("build", (() => "done") as unknown as () => Promise<void>), shared());
+  assert.match(output, /Debate result: converged/);
+}));
