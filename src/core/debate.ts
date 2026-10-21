@@ -2,7 +2,7 @@ import { randomInt } from "node:crypto";
 import { scoreContributions } from "./contribution.ts";
 import { parseReply } from "./parse.ts";
 import { DebateError, type DebateOptions, type DebateResult, type Debater, type Point, type Reply, type Role, type Turn } from "./types.ts";
-import { openingPrompt, firstCritiquePrompt, critiquePrompt, revisionPrompt, missingPointsPrompt, JSON_REPAIR, INTERRUPTION_PREFIX } from "../prompts.ts";
+import { openingPrompt, firstCritiquePrompt, critiquePrompt, revisionPrompt, missingPointsPrompt, jsonRepairPrompt, INTERRUPTION_PREFIX } from "../prompts.ts";
 
 export function abortReason(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new DebateError("cancelled", "Debate cancelled");
@@ -38,6 +38,7 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
   const proposer: Debater = opts.first === "random" ? ((opts.random ? opts.random() < 0.5 : randomInt(0, 2) === 0) ? "glm" : "deepseek") : opts.first;
   const result: DebateResult = {
     question: opts.question, context: opts.context, assignment: { proposer, challenger: proposer === "glm" ? "deepseek" : "glm" },
+    limits: { minRounds, maxRounds: opts.maxRounds }, stopChecks: [],
     status: "error", reason: "Debate did not finish", rounds: 0, answer: null, points: [], pointHistory: [], turns: [], startedAt, endedAt: startedAt,
   };
   const overall = new AbortController();
@@ -94,6 +95,16 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
       throw failure;
     }
   };
+  const validateChallenger = (reply: Reply): number => {
+    let next = highestID;
+    for (const point of reply.points) {
+      if (!points.has(point.id)) {
+        next++;
+        if (Number(point.id.slice(1)) !== next || point.status !== "open") throw new Error(`New challenger point must be open and use next unused ID C${next}`);
+      }
+    }
+    return next;
+  };
   const takeTurn = async (id: string, round: number, role: Role, message: string): Promise<Turn> => {
     live();
     const turn: Turn = { id, round, role, debater: result.assignment[role], message, startedAt: now(), endedAt: now(), retries: 0, attempts: [] };
@@ -110,17 +121,21 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
           parsed = parseReply(response.text);
           if (role === "proposer" && !parsed.answer) throw new Error("Proposer must provide a nonempty answer");
           if (role === "challenger" && parsed.points.some((p) => p.status === "conceded" || p.status === "defended")) throw new Error("Challenger may only use open/resolved/withdrawn");
+          if (role === "challenger") validateChallenger(parsed);
           turn.attempts.at(-1)!.parsed = parsed;
         } catch (error) {
-          turn.attempts.at(-1)!.error = `Invalid JSON response: ${messageOf(error)}`;
-          if (repairedJSON) throw new DebateError("protocol", `Invalid JSON twice in ${id}: ${messageOf(error)}`);
-          repairedJSON = true; message = JSON_REPAIR; kind = "json_repair"; continue;
+          const reason = messageOf(error);
+          turn.attempts.at(-1)!.error = `Invalid reply: ${reason}`;
+          opts.onEvent?.({ type: "validation_failure", turnID: id, at: now(), stage: "reply", reason, repair: !repairedJSON });
+          if (repairedJSON) throw new DebateError("protocol", `Invalid reply twice in ${id}: ${reason}`);
+          repairedJSON = true; message = jsonRepairPrompt(role, reason, [...points.keys()], highestID + 1); kind = "json_repair"; continue;
         }
         if (role === "proposer") {
           const addressed = new Set(parsed.points.filter((p) => p.status === "conceded" || p.status === "defended").map((p) => p.id));
           const missing = [...points.values()].filter((p) => p.status === "open" && !addressed.has(p.id)).map((p) => p.id);
           if (missing.length) {
             turn.attempts.at(-1)!.error = `Missing open point IDs: ${missing.join(", ")}`;
+            opts.onEvent?.({ type: "validation_failure", turnID: id, at: now(), stage: "missing_points", reason: turn.attempts.at(-1)!.error!, repair: !repairedMissing });
             if (repairedMissing) throw new DebateError("protocol", `Proposer still omitted ${missing.join(", ")}`);
             repairedMissing = true; message = missingPointsPrompt(missing); kind = "missing_points"; continue;
           }
@@ -131,15 +146,7 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
     finally { turn.endedAt = now(); opts.onTurn?.(structuredClone(turn)); }
   };
   const applyChallenger = (reply: Reply) => {
-    // Validate before mutating, including IDs of new objections.
-    let next = highestID;
-    for (const p of reply.points) {
-      if (!points.has(p.id)) {
-        const n = Number(p.id.slice(1));
-        if (n !== ++next || p.status !== "open") throw new DebateError("protocol", `New challenger point must be open and use next unused ID C${next}`);
-      }
-    }
-    highestID = next;
+    highestID = validateChallenger(reply);
     for (const p of reply.points) {
       const old = points.get(p.id);
       points.set(p.id, { id: p.id, summary: p.summary, status: p.status as Point["status"], challenger: p.note, proposer: old?.proposer ?? "Not yet addressed", proposerStatus: old?.proposerStatus });
@@ -159,12 +166,20 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
       applyChallenger(critique.parsed!);
       result.pointHistory.push({ turnID: critique.id, points: snapshot(points) });
       const open = [...points.values()].filter((p) => p.status === "open").map((p) => p.id).sort();
-      if (round >= minRounds && critique.parsed!.agrees_with_current_answer && !open.length) {
-        result.status = "converged"; result.reason = "Challenger endorses the current answer with no open points"; break;
-      }
       const key = JSON.stringify(open);
-      if (round >= Math.max(2, minRounds) && previousOpen === key) { result.status = "stalemate"; result.reason = "Open point IDs are unchanged across consecutive Challenger turns"; break; }
-      if (round === opts.maxRounds) { result.status = "max_rounds"; result.reason = "Maximum Challenger rounds reached"; break; }
+      const minimumMet = round >= minRounds;
+      const decision = minimumMet && critique.parsed!.agrees_with_current_answer && !open.length ? "converged"
+        : round >= Math.max(2, minRounds) && previousOpen === key ? "stalemate"
+        : round === opts.maxRounds ? "max_rounds" : "continue";
+      const check: DebateResult["stopChecks"][number] = { turnID: critique.id, round, minimumMet, agrees: critique.parsed!.agrees_with_current_answer,
+        openIDs: open, previousOpenIDs: previousOpen === undefined ? null : JSON.parse(previousOpen) as string[], decision };
+      result.stopChecks.push(check); opts.onEvent?.({ type: "stop_check", check: structuredClone(check) });
+      if (decision !== "continue") {
+        result.status = decision;
+        result.reason = decision === "converged" ? "Challenger endorses the current answer with no open points"
+          : decision === "stalemate" ? "Open point IDs are unchanged across consecutive Challenger turns" : "Maximum Challenger rounds reached";
+        break;
+      }
       previousOpen = key;
       proposal = await takeTurn(`P${round}`, round, "proposer", revisionPrompt(critique.text!, snapshot(points)));
       result.answer = proposal.parsed!.answer;

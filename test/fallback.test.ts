@@ -7,7 +7,7 @@ import { OpenAICompatibleAdapter } from "../src/adapters/openai-compatible.ts";
 import { defaults, loadConfig, configSchema } from "../src/config.ts";
 import { runDebate } from "../src/core/debate.ts";
 import { DebateError } from "../src/core/types.ts";
-import { DEBATER_SYSTEM, INTERRUPTION_PREFIX, JSON_REPAIR } from "../src/prompts.ts";
+import { DEBATER_SYSTEM, INTERRUPTION_PREFIX } from "../src/prompts.ts";
 import { executeDebate } from "../src/index.ts";
 import { mockCompletions, completion, json } from "./helpers/http.ts";
 
@@ -125,7 +125,8 @@ test("fallback engine JSON repair retains the malformed assistant reply in its o
   const result = await runDebate({ question: "test", maxRounds: 1, first: "glm", callTimeoutMs: 2000, totalTimeoutMs: 5000, callModel: adapter.callModel });
   assert.equal(result.status, "converged");
   assert.equal(server.requests[1].body.messages.at(-2).content, "malformed reply");
-  assert.equal(server.requests[1].body.messages.at(-1).content, JSON_REPAIR);
+  assert.match(server.requests[1].body.messages.at(-1).content, /You are the PROPOSER/);
+  assert.match(server.requests[1].body.messages.at(-1).content, /Provide your full nonempty answer/);
 });
 
 test("fallback configuration supports endpoint, key-env and independent model overrides", async () => {

@@ -54,7 +54,7 @@ test("bad JSON recovers once", async () => {
 });
 test("bad JSON twice ends with error and preserves attempts", async () => {
   const r = await scripted(["not JSON", "still not JSON"]).result;
-  assert.equal(r.status, "error"); assert.match(r.reason, /Invalid JSON twice/); assert.equal(r.turns[0].attempts.length, 2);
+  assert.equal(r.status, "error"); assert.match(r.reason, /Invalid reply twice/); assert.equal(r.turns[0].attempts.length, 2);
 });
 test("call timeout retries with interruption prefix and discards late output", async () => {
   let finish!: (value: { text: string }) => void;
@@ -123,6 +123,7 @@ test("minimum rounds defers early agreement until each side has three turns", as
   const { result, calls } = scripted([json(), json(null, [], true), json(), json(null, [], true), json(), json(null, [], true)], { minRounds: 3 });
   const r = await result;
   assert.equal(r.status, "converged"); assert.equal(r.rounds, 3);
+  assert.deepEqual(r.stopChecks.map(c => [c.minimumMet, c.decision]), [[false, "continue"], [false, "continue"], [true, "converged"]]);
   assert.deepEqual(r.turns.map(t => t.id), ["P0", "C1", "P1", "C2", "P2", "C3"]);
   assert.equal(calls.filter(c => c.model === "glm").length, 3); assert.equal(calls.filter(c => c.model === "deepseek").length, 3);
 });
@@ -147,4 +148,30 @@ test("minimum rounds never postpones cancellation or transport errors", async ()
   assert.equal(cancelled.status, "cancelled"); assert.equal(cancelled.turns.length, 2);
   const failed = await scripted([json(), new Error("provider unavailable")], { minRounds: 4 }).result;
   assert.equal(failed.status, "error"); assert.equal(failed.answer, "The answer"); assert.match(failed.reason, /provider unavailable/);
+});
+
+
+test("new resolved points receive a role-aware repair instead of escaping validation", async () => {
+  const events: unknown[] = [];
+  const { result, calls } = scripted([json(), json(null, [p("C1", "resolved"), p("C2", "resolved")], true), json(null, [], true)], { onEvent: e => events.push(e) });
+  const r = await result; assert.equal(r.status, "converged"); assert.equal(r.turns[1].attempts.length, 2);
+  assert.equal(r.turns[1].attempts[1].kind, "json_repair"); assert.equal(r.points.length, 0);
+  assert.match(calls[2].message, /You are the CHALLENGER/); assert.match(calls[2].message, /next unused ID C1/);
+  assert.match(calls[2].message, /Do not invent objections/);
+  assert.ok(events.some(e => (e as any).type === "validation_failure" && (e as any).repair));
+});
+test("rejected new point IDs never consume IDs or mutate canonical objections", async () => {
+  const r = await scripted([json(), json(null, [p(), p("C3")]), json(null, [p(), p("C2")]), json("Fixed", [p("C1", "conceded"), p("C2", "conceded")]), json(null, [p("C1", "resolved"), p("C2", "resolved")], true)]).result;
+  assert.equal(r.status, "converged"); assert.deepEqual(r.points.map(p => p.id), ["C1", "C2"]);
+  assert.deepEqual(r.pointHistory[0].points.map(p => p.id), ["C1", "C2"]);
+});
+test("second invalid Challenger reply stops after one repair without declaring agreement", async () => {
+  const r = await scripted([json(), json(null, [p("C1", "resolved")], true), json(null, [p("C1", "resolved")], true)]).result;
+  assert.equal(r.status, "error"); assert.match(r.reason, /Invalid reply twice/); assert.equal(r.turns[1].attempts.length, 2);
+  assert.equal(r.stopChecks.length, 0); assert.equal(r.points.length, 0); assert.equal(r.contributions?.winner, "undetermined");
+});
+test("Proposer repair explicitly keeps the role and requires a full answer", async () => {
+  const { result, calls } = scripted([json(null), json(), json(null, [], true)]);
+  assert.equal((await result).status, "converged"); assert.match(calls[1].message, /You are the PROPOSER/);
+  assert.match(calls[1].message, /Provide your full nonempty answer/);
 });

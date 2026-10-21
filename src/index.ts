@@ -26,12 +26,13 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
   try { config = await loadConfig(ctx.location.directory, ctx.location.project.directory); }
   catch (error) { configurationError = error; }
   const journal = new DebateLog(config.logDir, args.question, { question: args.question, context: args.context, config, args,
-    opencodeVersion: ctx.app.version, parentSessionID: execution.sessionID, turns: [], pointHistory: [], sessions: [] });
+    opencodeVersion: ctx.app.version, parentSessionID: execution.sessionID, limits: { minRounds: args.min_rounds ?? 1, maxRounds: args.max_rounds ?? config.defaultMaxRounds }, validationFailures: [], stopChecks: [], turns: [], pointHistory: [], sessions: [] });
   try { await journal.initialize(); }
   catch (error) { return `## Debate result: error\n### Final answer\nNo answer was gathered.\n### Details\nCannot create the required debate log at ${journal.path}: ${error instanceof Error ? error.message : String(error)}`; }
   const adapter: DebateAdapter = config.backend === "opencode"
     ? new OpenCodeAdapter(ctx, config, execution.sessionID, journal.slug, owned, retryHints, restrictedReads)
     : new OpenAICompatibleAdapter(config);
+  const validationFailures: object[] = []; const stopChecks: object[] = [];
   const turns: Turn[] = []; const pendingWrites: Promise<unknown>[] = [];
   const progress = (message: string) => {
     const task = Promise.race([execution.progress({ title: "Debate", description: message, status: message }), new Promise<void>(resolve => { const timer = setTimeout(resolve, 1000); timer.unref(); })]).catch(() => {});
@@ -57,6 +58,10 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
         } else if (event.type === "turn_start") {
           const t = event.turn;
           progress(t.round === 0 ? `${MODEL_NAMES[t.debater]} (proposer) preparing the opening answer.` : `Round ${t.round}/${args.max_rounds ?? config.defaultMaxRounds}: ${MODEL_NAMES[t.debater]} (${t.role}) ${t.role === "challenger" ? "reviewing the revision" : "responding and revising"}.`);
+        } else if (event.type === "validation_failure") {
+          validationFailures.push(event); save({ validationFailures });
+          progress(`${event.turnID}: invalid reply (${event.reason}); ${event.repair ? "requesting one repair" : "stopping after failed repair"}.`);
+        } else if (event.type === "stop_check") { stopChecks.push(event.check); save({ stopChecks });
         } else if (event.type === "retry") progress(`${event.turnID}: retrying after ${event.reason}${event.delayMs ? ` in ${event.delayMs} ms` : ""}.`);
       },
       onTurn(turn) { turns.push(turn); save({ turns, sessions: adapter.sessions }); },

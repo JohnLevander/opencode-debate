@@ -87,3 +87,13 @@ Minimum-round verification: TypeScript and all 73 tests pass (including the two 
 Added a pure deterministic retained-phrases-v1 scorer and a result line reporting a contribution winner/tie/undetermined with both word counts. It credits normalized final-answer words covered by matching five-word phrases (at least three non-stop words) to the first valid answer/point introducing them, excluding supplied question/context. Counts, method, basis, and winner are logged. Error/cancelled partial answers never declare a winner. Scoring has no effect on protocol control and makes no extra model calls.
 
 This is explicitly a text-reuse estimate: paraphrases are not semantically attributed, and retained opening content favors its original Proposer. Tests cover adopted Challenger wording, earliest-source credit despite repetition/casing, provided context, ties, short/unmatched text, paraphrases, invalid replies, and incomplete outcomes. Plugin integration checks result rendering and persistent score metadata.
+
+
+## Live city-debate repair and logging follow-up
+
+The user's city-comparison run (log suffix e42fe756) returned error after C1 because GLM introduced C1/C2 already resolved while agreeing with the proposal. The strict protocol correctly rejected those IDs, but ID/status checks happened after the reply-repair path, causing an immediate stop. Moved immutable Challenger validation inside the single repair path; only a validated reply can mutate canonical IDs/statuses. The repair prompt includes the actual error and role, next unused ID and known IDs; initial critique guidance puts checked-correct observations in prose rather than new resolved points. Two invalid replies still stop cleanly. Proposer repair now explicitly requires a full answer and retains the Proposer role. No reply is silently normalized into agreement.
+
+Errors/cancellation now label retained output partial/incomplete; non-converged normal endings use current answer. An empty point list explicitly does not establish agreement. The caller's tool description asks it to preserve the completion status and contribution line. Added structured validationFailures checkpoints and per-review stopChecks, plus resolved limits; private existing logs retain raw attempts and reasoning separately. No additional model request or paid backend was used for this fix. Regression tests reproduce the rejected resolved-point pattern, successful bounded repair, failed second repair, atomic IDs, role guidance, and persistent log/output semantics.
+
+
+Validation after the repair/logging changes: npm run check passes TypeScript and all 84 tests. Provider availability and successful contested multi-round live-model execution remain separate from these deterministic regression checks.

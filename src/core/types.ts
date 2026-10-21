@@ -21,9 +21,14 @@ export interface ContributionScore {
   words: Record<Debater, number>; providedWords: number; unmatchedWords: number; totalWords: number;
   basis: "final" | "partial" | "none";
 }
+export interface StopCheck {
+  turnID: string; round: number; minimumMet: boolean; agrees: boolean; openIDs: string[]; previousOpenIDs: string[] | null;
+  decision: "continue" | "converged" | "stalemate" | "max_rounds";
+}
 export interface DebateResult {
   question: string; context?: string; assignment: { proposer: Debater; challenger: Debater };
   contributions?: ContributionScore;
+  limits: { minRounds: number; maxRounds: number }; stopChecks: StopCheck[];
   status: DebateStatus; reason: string; rounds: number; answer: string | null;
   points: Point[]; pointHistory: { turnID: string; points: Point[] }[];
   turns: Turn[]; startedAt: number; endedAt: number;
@@ -32,6 +37,8 @@ export type DebateEvent =
   | { type: "start"; assignment: DebateResult["assignment"] }
   | { type: "turn_start"; turn: Turn }
   | { type: "retry"; turnID: string; reason: string; delayMs: number }
+  | { type: "validation_failure"; turnID: string; at: number; stage: "reply" | "missing_points"; reason: string; repair: boolean }
+  | { type: "stop_check"; check: StopCheck }
   | { type: "end"; result: DebateResult };
 export interface DebateOptions {
   question: string; context?: string; maxRounds: number; minRounds?: number; first: Debater | "random";

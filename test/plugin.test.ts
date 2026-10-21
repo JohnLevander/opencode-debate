@@ -93,9 +93,37 @@ for (const scenario of ["converged", "cancelled", "timeout"] as const) {
     assert.equal(log.finalResult, output); assert.ok(progress.length >= 3);
     if (scenario === "converged") {
       assert.equal(log.rounds, 2); assert.equal(log.turns.length, 4); assert.equal(log.args.min_rounds, 2);
+      assert.deepEqual(log.limits, { minRounds: 2, maxRounds: 4 });
+      assert.deepEqual(log.stopChecks.map((c: any) => c.decision), ["continue", "converged"]);
       assert.equal(log.contributions.method, "retained-phrases-v1"); assert.match(output, /Contribution winner \(text-reuse estimate\)/);
       assert.equal(log.turns[0].reasoning, "secret reasoning"); assert.ok(!fake.prompts[1].text.includes("secret reasoning"));
       assert.match(output, /### Transcript/); assert.equal(log.answer, "A valid final answer");
     } else { assert.ok(fake.interrupts.includes("child-0")); assert.ok(fake.interrupts.includes("child-1")); assert.ok(log.interruptions.some((entry: any) => entry.sessionID === "child-0" && entry.acknowledgedAt)); assert.ok(log.interruptions.some((entry: any) => entry.sessionID === "child-1" && entry.acknowledgedAt)); }
   });
 }
+
+
+test("invalid Challenger statuses are logged twice and the partial result cannot imply agreement", async t => {
+  const root = await directory(); const previous = process.env.OPENCODE_DEBATE_LOG_DIR;
+  process.env.OPENCODE_DEBATE_LOG_DIR = root;
+  t.after(() => { if (previous === undefined) delete process.env.OPENCODE_DEBATE_LOG_DIR; else process.env.OPENCODE_DEBATE_LOG_DIR = previous; });
+  const fake = fakeClient(); const original = fake.raw.session.prompt;
+  fake.raw.session.prompt = async input => {
+    const admitted = await original(input);
+    const content = fake.messages.get(input.sessionID)!.at(-1).content;
+    content[0].text = JSON.stringify({ answer: fake.prompts.length === 1 ? "A valid retained opening answer for testing" : null,
+      points: fake.prompts.length === 1 ? [] : [{ id: "C1", summary: "Clarification", status: "resolved", note: "Already accepted" }],
+      agrees_with_current_answer: true, confidence: 0.8 });
+    content.splice(1, 1); return admitted;
+  };
+  const ctx = { ...fake.client, location: { directory: root, project: { directory: root } }, app: { version: "2.0.32" } } as unknown as Plugin.Context;
+  const output = await executeDebate(ctx, { question: "test", first: "glm" }, { sessionID: "parent", agent: "build", signal: new AbortController().signal, progress: async () => {} }, new Set());
+  const log = JSON.parse(await readFile(path.join(root, (await readdir(root))[0]), "utf8"));
+  assert.equal(log.status, "error"); assert.equal(log.validationFailures.length, 2);
+  assert.deepEqual(log.validationFailures.map((e: any) => e.repair), [true, false]);
+  assert.equal(log.turns[1].attempts.length, 2); assert.match(log.turns[1].attempts[0].text, /resolved/);
+  assert.match(log.validationFailures[0].reason, /New challenger point must be open/);
+  assert.equal(log.stopChecks.length, 0); assert.equal(log.contributions.winner, "undetermined");
+  assert.match(output, /Partial answer \(debate incomplete\)/); assert.match(output, /does not establish agreement/);
+  assert.ok(!output.includes("### Final answer"));
+});
