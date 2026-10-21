@@ -3,6 +3,7 @@ import type { SessionStructuredError } from "@opencode/client";
 import { abortable, abortReason } from "../core/debate.ts";
 import { DebateError, type Debater, type DebateResult } from "../core/types.ts";
 import type { DebateConfig } from "../config.ts";
+import { RestrictedRead, type RestrictedReads } from "../restricted-read.ts";
 import type { DebateAdapter, SessionDetail, SessionInterruption } from "./types.ts";
 export { retryAfterMs } from "./http.ts";
 export type { SessionDetail } from "./types.ts";
@@ -10,10 +11,10 @@ export type OpenCodeClient = Pick<Plugin.Context, "session" | "model">;
 export const AGENT_ID = "debater";
 export const MODEL_NAMES: Record<Debater, string> = { glm: "GLM", deepseek: "DeepSeek" };
 export const NO_TOOLS = [{ action: "*", resource: "*", effect: "deny" as const }];
-export function providerError(error: SessionStructuredError, retryAfter?: number): DebateError {
+export function providerError(error: SessionStructuredError, retryAfter?: number, readCompatibility = false): DebateError {
   const nativeMessage = `${error.type}: ${error.message}`;
   const message = /free tier can only be used from within OpenCode/i.test(error.message)
-    ? `${nativeMessage} This request already ran inside an OpenCode child session. OpenCode free models have a reported compatibility issue when read/shell tools are disabled; these debaters intentionally have all tools disabled. This error alone does not establish that a paid provider or OpenRouter API key is needed. The debate remains blocked; changing tool permissions requires approval. Upstream: https://github.com/anomalyco/opencode/issues/51241`
+    ? `${nativeMessage} This request already ran inside an OpenCode child session. OpenCode free models have a reported compatibility issue when read/shell tools are disabled; ${readCompatibility ? "restricted empty-file read compatibility mode was enabled, but the gateway still rejected the request." : "these debaters intentionally have all tools disabled."} This error alone does not establish that a paid provider or OpenRouter API key is needed. The debate remains blocked; changing tool permissions requires approval. Upstream: https://github.com/anomalyco/opencode/issues/51241`
     : nativeMessage;
   return new DebateError(error.status === 429 || /rate.?limit|too many requests/i.test(error.type) ? "rate_limit" : "transport", message, retryAfter);
 }
@@ -25,7 +26,7 @@ export class OpenCodeAdapter implements DebateAdapter {
   private assignment?: DebateResult["assignment"];
   private closed = false;
   private pending = new Map<Debater, Promise<void>>();
-  constructor(private ctx: OpenCodeClient, private config: DebateConfig, private parentID: string, private slug: string, private owned: Set<string>, private retryHints = new Map<string, number>()) {}
+  constructor(private ctx: OpenCodeClient, private config: DebateConfig, private parentID: string, private slug: string, private owned: Set<string>, private retryHints = new Map<string, number>(), private restrictedReads: RestrictedReads = new Map()) {}
   setAssignment(value: DebateResult["assignment"]) { this.assignment = value; }
   private async initialize(): Promise<void> {
     if (!this.assignment) throw new Error("Missing role assignment");
@@ -37,6 +38,7 @@ export class OpenCodeAdapter implements DebateAdapter {
       if (!available) throw new DebateError("transport", `Model ${configured.providerID}/${configured.modelID} is unavailable. Configure backend: "openai-compatible" in .opencode/debate.config.json for the fallback.`);
       if (configured.variant && !available.variants.some(v => v.id === configured.variant)) throw new DebateError("transport", `Variant ${configured.variant} is unavailable for ${configured.modelID}`);
     }
+    const readPolicy = this.config.readCompatibility ? await RestrictedRead.create(parent.location.directory) : undefined;
     for (const debater of ["glm", "deepseek"] as const) {
       if (this.closed) throw new DebateError("cancelled", "Debate adapter closed before child creation");
       const selected = this.config.models[debater];
@@ -44,10 +46,12 @@ export class OpenCodeAdapter implements DebateAdapter {
       const title = `debate: ${this.slug} | ${MODEL_NAMES[debater]} (${role})`;
       const child = await this.ctx.session.create({ parentID: this.parentID, title, agent: AGENT_ID,
         model: { providerID: selected.providerID, id: selected.modelID, ...(selected.variant ? { variant: selected.variant } : {}) },
-        permissions: NO_TOOLS, metadata: { opencodeDebate: true, debater, role },
+        permissions: readPolicy?.permissions ?? NO_TOOLS, metadata: { opencodeDebate: true, debater, role },
       });
-      this.owned.add(child.id); this.sessions.push({ debater, id: child.id, title, role, model: selected });
-      if (this.closed) { await this.interrupt(child.id); this.owned.delete(child.id); throw new DebateError("cancelled", "Child arrived after debate ended and was interrupted"); }
+      this.owned.add(child.id);
+      if (readPolicy) this.restrictedReads.set(child.id, readPolicy);
+      this.sessions.push({ debater, id: child.id, title, role, model: selected, ...(readPolicy ? { readCompatibilityFile: readPolicy.file } : {}) });
+      if (this.closed) { await this.interrupt(child.id); this.owned.delete(child.id); this.restrictedReads.delete(child.id); throw new DebateError("cancelled", "Child arrived after debate ended and was interrupted"); }
     }
   }
   private async interrupt(sessionID: string): Promise<void> {
@@ -108,8 +112,8 @@ export class OpenCodeAdapter implements DebateAdapter {
       if (before.some(m => m.id === admitted.id)) throw new DebateError("transport", "Debate input ID was reused");
       const assistant = fresh.filter(m => m.type === "assistant").at(-1);
       const idle = fresh.filter(m => m.type === "idle").at(-1);
-      if (assistant?.error) throw providerError(assistant.error, this.retryHints.get(child.id));
-      if (idle?.error) throw providerError(idle.error, this.retryHints.get(child.id));
+      if (assistant?.error) throw providerError(assistant.error, this.retryHints.get(child.id), this.config.readCompatibility);
+      if (idle?.error) throw providerError(idle.error, this.retryHints.get(child.id), this.config.readCompatibility);
       if (state.outcome === "failed" || state.outcome === "interrupted") throw new DebateError("transport", `Child session ${state.outcome}`);
       if (!assistant || !assistant.time.completed || !assistant.finish || assistant.finish === "tool-calls" || assistant.finish === "length" || assistant.finish === "error" || assistant.finish === "content-filter") throw new DebateError("transport", "Child completed without a final, untruncated assistant answer");
       if (assistant.agent !== AGENT_ID || assistant.model.id !== child.model.modelID || assistant.model.providerID !== child.model.providerID || (assistant.model.variant ?? "default") !== (child.model.variant ?? "default")) throw new DebateError("transport", "Child agent or model selection changed during debate");
@@ -124,5 +128,5 @@ export class OpenCodeAdapter implements DebateAdapter {
     try { return await abortable(work, signal); }
     finally { signal.removeEventListener("abort", stop); }
   };
-  release() { for (const s of this.sessions) this.owned.delete(s.id); }
+  release() { for (const s of this.sessions) { this.owned.delete(s.id); this.restrictedReads.delete(s.id); } }
 }

@@ -2,6 +2,7 @@ import type { DebateConfig } from "../config.ts";
 import type { DebateOptions, DebateResult, Debater } from "../core/types.ts";
 
 export interface SessionDetail {
+  readCompatibilityFile?: string;
   debater: Debater; id: string; title: string; model: DebateConfig["models"][Debater]; role: "proposer" | "challenger";
 }
 export interface SessionInterruption {

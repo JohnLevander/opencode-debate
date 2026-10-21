@@ -15,15 +15,15 @@ test("v2 tool registration preserves exact description and hides/isolates debate
   const ctx = {
     agent: { list: async () => ({ data: [] }), transform: async (fn: Function) => fn({ update: (_id: string, update: Function) => update(agent) }) },
     session: { hook: async (name: string, fn: Function) => { hooks[name] = fn; } },
-    tool: { transform: async (fn: Function) => fn({ add: (value: any) => { tool = value; } }) },
+    tool: { hook: async (name: string, fn: Function) => { hooks[`tool.${name}`] = fn; }, transform: async (fn: Function) => fn({ add: (value: any) => { tool = value; } }) },
   } as unknown as Plugin.Context;
   await plugin.setup(ctx);
   assert.equal(tool.description, TOOL_DESCRIPTION); assert.equal(tool.name, "debate");
   assert.equal(agent.hidden, true); assert.equal(agent.mode, "subagent"); assert.equal(agent.system, DEBATER_SYSTEM);
   assert.deepEqual(agent.permissions, [{ action: "*", resource: "*", effect: "deny" }]);
   const event = { agent: "debater", sessionID: "child", tools: { debate: {}, shell: {}, mcp_custom: {} }, system: [{ type: "text", text: "Host harness instructions" }] as { type: string; text: string }[] };
-  hooks.context(event); assert.deepEqual(event.tools, {}); assert.equal(event.system[0].text, "Host harness instructions"); assert.equal(event.system.length, 1);
-  const parent = { ...event, agent: "build", tools: { shell: {} } }; hooks.context(parent); assert.deepEqual(parent.tools, { shell: {} });
+  await hooks.context(event); assert.deepEqual(event.tools, {}); assert.equal(event.system[0].text, "Host harness instructions"); assert.equal(event.system.length, 1);
+  const parent = { ...event, agent: "build", tools: { shell: {} } }; await hooks.context(parent); assert.deepEqual(parent.tools, { shell: {} });
   const retry = { agent: "debater", decision: { retry: true } }; hooks.retry(retry); assert.deepEqual(retry.decision, { retry: false });
   assert.ok(debateArgs.safeParse({ question: "Question", max_rounds: 8 }).success);
   assert.ok(!debateArgs.safeParse({ question: "Question", max_rounds: 9 }).success);

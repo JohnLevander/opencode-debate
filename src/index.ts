@@ -8,6 +8,7 @@ import { OpenCodeAdapter, AGENT_ID, MODEL_NAMES, NO_TOOLS, retryAfterMs } from "
 import { OpenAICompatibleAdapter } from "./adapters/openai-compatible.ts";
 import type { DebateAdapter } from "./adapters/types.ts";
 import { DebateLog } from "./log.ts";
+import { registerToolIsolation, type RestrictedReads } from "./restricted-read.ts";
 import { renderResult } from "./render.ts";
 
 export const debateArgs = z.object({
@@ -18,7 +19,7 @@ export const debateArgs = z.object({
 export type DebateArgs = z.input<typeof debateArgs>;
 type Execution = { sessionID: string; agent: string; signal: AbortSignal; progress: (data: Record<string, unknown>) => Promise<void> };
 
-export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, execution: Execution, owned: Set<string>, retryHints = new Map<string, number>()): Promise<string> {
+export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, execution: Execution, owned: Set<string>, retryHints = new Map<string, number>(), restrictedReads: RestrictedReads = new Map()): Promise<string> {
   const args = debateArgs.parse(input);
   let config: DebateConfig = defaults(); let configurationError: unknown;
   try { config = await loadConfig(ctx.location.directory, ctx.location.project.directory); }
@@ -28,7 +29,7 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
   try { await journal.initialize(); }
   catch (error) { return `## Debate result: error\n### Final answer\nNo answer was gathered.\n### Details\nCannot create the required debate log at ${journal.path}: ${error instanceof Error ? error.message : String(error)}`; }
   const adapter: DebateAdapter = config.backend === "opencode"
-    ? new OpenCodeAdapter(ctx, config, execution.sessionID, journal.slug, owned, retryHints)
+    ? new OpenCodeAdapter(ctx, config, execution.sessionID, journal.slug, owned, retryHints, restrictedReads)
     : new OpenAICompatibleAdapter(config);
   const turns: Turn[] = []; const pendingWrites: Promise<unknown>[] = [];
   const progress = (message: string) => {
@@ -77,6 +78,7 @@ export default Plugin.define({
   id: "opencode-debate",
   async setup(ctx) {
     const owned = new Set<string>();
+    const restrictedReads: RestrictedReads = new Map();
     const retryHints = new Map<string, number>();
     const existing = (await ctx.agent.list()).data.find(a => a.id === AGENT_ID);
     if (existing && existing.description !== "Internal structured debate participant") throw new Error("Agent 'debater' already exists with another definition; rename it before enabling opencode-debate.");
@@ -85,12 +87,7 @@ export default Plugin.define({
       agent.mode = "subagent"; agent.hidden = true; agent.system = DEBATER_SYSTEM;
       agent.permissions = [...NO_TOOLS]; delete agent.steps;
     }));
-    await ctx.session.hook("context", event => {
-      if (event.agent !== AGENT_ID && !owned.has(event.sessionID)) return;
-      for (const tool of Object.keys(event.tools)) delete event.tools[tool];
-      // Preserve the agent prompt and any additional context assembled by OpenCode.
-      // Tool isolation does not require replacing the system-message array.
-    });
+    await registerToolIsolation(ctx, owned, restrictedReads);
     await ctx.session.hook("http.response", event => {
       if (event.agent !== AGENT_ID && !owned.has(event.sessionID)) return;
       if (event.response.status === 429) {
@@ -104,7 +101,7 @@ export default Plugin.define({
     });
     await ctx.tool.transform(editor => editor.add({
       name: "debate", description: TOOL_DESCRIPTION, input: debateArgs, options: { codemode: false },
-      async execute(input, context) { return { content: await executeDebate(ctx, input, context, owned, retryHints) }; },
+      async execute(input, context) { return { content: await executeDebate(ctx, input, context, owned, retryHints, restrictedReads) }; },
     }));
   },
 });
