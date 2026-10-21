@@ -100,7 +100,7 @@ export default Plugin.define({
       if (event.agent === AGENT_ID || owned.has(event.sessionID)) event.decision = { retry: false };
     });
     await ctx.tool.transform(editor => editor.add({
-      name: "debate", description: TOOL_DESCRIPTION, input: debateArgs, options: { codemode: false },
+      name: "debate", description: TOOL_DESCRIPTION, input: debateArgs, options: { codemode: true, pinned: true },
       async execute(input, context) { return { content: await executeDebate(ctx, input, context, owned, retryHints, restrictedReads) }; },
     }));
   },

@@ -66,7 +66,7 @@ export default Plugin.define({
           required: ["question"],
           additionalProperties: false,
         },
-        options: { codemode: false },
+        options: { codemode: true, pinned: true },
         async execute(input, context) {
           // Validate application constraints, then invoke the protocol engine.
           return { content: "Rendered debate result" }
@@ -275,3 +275,10 @@ Only this findings document and a minimal secret/dependency/log ignore file belo
 The Phase 0 inventory/source findings did not guarantee free-tier inference. Live OpenChamber tests now show that both configured free models reject the tool-free debater with `provider.auth` / `FreeTierError` inside OpenCode. [Upstream issue #51241](https://github.com/anomalyco/opencode/issues/51241) reports matching behavior with denied read/shell permissions. Its gateway-side cause remains outside this plugin's control. Keeping native OpenCode system context did not fix it. The required deny-all/no-tools behavior is retained. See [integration evidence](INTEGRATION.md); real convergence and contested point histories remain unverified.
 
 The installed server can normalize an omitted reasoning variant to `"default"`; adapter matching treats those as equivalent. Explicit variants still require inventory support and exact matching. OpenChamber displays retained child sessions under the parent session's Subagents panel. A real UI Stop finalized a cancelled log and acknowledged interrupts for both children; the active child was stopped and the other was already idle. The UI displays Step interrupted because the parent step is cancelled too. Injected pre-dispatch delay tests verified deadlines and cancellation without a hanging parent. They do not prove remote-stream cancellation or successful multi-round provider execution.
+
+
+## Code Mode discovery follow-up
+
+OpenCode 2.0.32 partitions registered tools: `codemode: false` tools are advertised directly and excluded from Code Mode's runtime/search inventory. An empty Code Mode search therefore does not prove a direct tool is unloaded. The user reproduced this confusion in a build session whose project reported opencode-debate active. The plugin now registers `options: { codemode: true, pinned: true }`. The installed `@opencode/schema` tool options support both fields; pinning retains the signature in the inline catalog even when its normal budget is exhausted. The command still requires explicit user invocation.
+
+Sources: pinned-version [tool snapshot](https://github.com/anomalyco/opencode/blob/v2.0.32/packages/core/src/tool.ts), [Code Mode runtime](https://github.com/anomalyco/opencode/blob/v2.0.32/packages/core/src/codemode/tool.ts), and [catalog selection](https://github.com/anomalyco/opencode/blob/v2.0.32/packages/core/src/codemode/catalog.ts). An isolated 2.0.32 server loaded the changed plugin; a context hook recorded the registered options, an advertised execute tool, and a debate signature in the assembled catalog instructions, then deliberately stopped before inference. This verifies catalog exposure, not a new live-model debate.

@@ -63,3 +63,10 @@ The contested free-model test reached seven substantive Challenger objections bu
 ## Approved global activation
 
 The user approved the exact merge into `~/.config/opencode/debate.config.json`: backend `opencode`, readCompatibility `true`. The file was updated atomically with mode 0600, preserving other fields. Effective configuration verification selected the two original free model IDs. OpenChamber reported no active sessions before its OpenCode server was restarted through Settings. After restart, the server reported 2.0.32, both `opencode-debate` and `free-only` were active, and the hidden subagent `debater` was registered. No API key, provider-policy change, paid backend, or automatic paid substitution was introduced.
+
+
+## Code Mode discovery correction
+
+The user's code-review caller searched Code Mode and declared debate absent despite the plugin being active in that session's project. The earlier registration used codemode false, which excludes a direct tool from Code Mode search. Changed debate to a pinned Code Mode registration and updated the centralized command to request immediate invocation, pass supplied attachments as context, await the discovered callable, and avoid a simulated substitute. Child restrictions and deterministic orchestration are unchanged.
+
+The registration regression test passes. A separate isolated OpenCode 2.0.32 context probe confirmed codemode true/pinned true and the debate signature in assembled catalog instructions, with execute advertised; it deliberately aborted before inference. No global file changes or new model requests were needed. The caller's failed code-review attempt created no debate log. Parent provider retries are separate from the engine's bounded retry budget.

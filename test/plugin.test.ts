@@ -19,6 +19,7 @@ test("v2 tool registration preserves exact description and hides/isolates debate
   } as unknown as Plugin.Context;
   await plugin.setup(ctx);
   assert.equal(tool.description, TOOL_DESCRIPTION); assert.equal(tool.name, "debate");
+  assert.deepEqual(tool.options, { codemode: true, pinned: true });
   assert.equal(agent.hidden, true); assert.equal(agent.mode, "subagent"); assert.equal(agent.system, DEBATER_SYSTEM);
   assert.deepEqual(agent.permissions, [{ action: "*", resource: "*", effect: "deny" }]);
   const event = { agent: "debater", sessionID: "child", tools: { debate: {}, shell: {}, mcp_custom: {} }, system: [{ type: "text", text: "Host harness instructions" }] as { type: string; text: string }[] };
