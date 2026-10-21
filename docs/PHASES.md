@@ -58,3 +58,8 @@ The isolated real engine debate and the actual installed debate tool both conver
 Validation: TypeScript and 66 automated tests pass, including seven new compatibility checks. Configuration is opt-in and recorded in logs; the global configuration still has only backend opencode, awaiting a separately previewed external edit before general enablement. The exception supersedes the original no-tool requirement only when expressly enabled. The paid fallback remains available in code but is not selected or used.
 
 The contested free-model test reached seven substantive Challenger objections but ended with a clean partial error when GLM's Proposer repair used the wrong role schema and no answer. The last valid proposal and seven open points remain in the log/result. Successful contested multi-round convergence/stalemate remains unverified; this is recorded as an output-protocol failure rather than hidden by extra retries. Both repo-local experiment fixtures were disabled after testing, and the successful IEEE caller/children reported zero cost.
+
+
+## Approved global activation
+
+The user approved the exact merge into `~/.config/opencode/debate.config.json`: backend `opencode`, readCompatibility `true`. The file was updated atomically with mode 0600, preserving other fields. Effective configuration verification selected the two original free model IDs. OpenChamber reported no active sessions before its OpenCode server was restarted through Settings. After restart, the server reported 2.0.32, both `opencode-debate` and `free-only` were active, and the hidden subagent `debater` was registered. No API key, provider-policy change, paid backend, or automatic paid substitution was introduced.
