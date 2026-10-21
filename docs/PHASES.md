@@ -109,3 +109,13 @@ Two temporary-home/config tests cover no-write preview, field preservation, priv
 ## Public GitHub distribution
 
 The user authorized publishing JohnLevander/opencode-debate as a public GitHub repository. Updated the README and friend guide with the concrete HTTPS clone URL, free setup preview/apply commands, restart/smoke-test instructions, fast-forward updates, and versioned ZIP/checksum download links for v0.1.0. The main README now uses the complete free preset rather than the older link-only installation path. No credentials, global provider policies, or plugin configuration outside the repository were changed for publication. Release packaging uses committed source; local logs, configs, dependencies, caches, and Git history are excluded from the ZIP.
+
+
+## Full platform onboarding guide — v0.1.1
+
+The user requested macOS, Linux, and Windows instructions plus OpenCode/OpenChamber downloads, sign-in, and connection steps. Added docs/GETTING_STARTED.md and linked it prominently from README and INSTALL. Verified upstream OpenChamber 2.4.0 release asset names and package requirements (Node >=24.14), published @opencode/cli 2.0.32 / @openchamber/web 2.4.0 versions, installed OpenCode auth login flags and device method, and official platform/server/sign-in documentation. The locally installed OpenChamber is 2.4.0 with bundled OpenCode 2.0.32. Desktop uses its bundled server; the CLI route pins the matching published versions.
+
+Windows uses Ubuntu/WSL 2 with the CLI/browser interface, with an optional documented Windows Desktop pairing route to that WSL instance. Native Windows plugin installation is not claimed. Linux/WSL instructions are upstream-based and were not executed here. The guide keeps plugin/server/user environments aligned, separates UI passwords from provider sign-in, selects only the requested Free models, and explains external-server authentication and known availability limits. Bumped the distributable to 0.1.1 so the expanded guide ships in a new ZIP/release without replacing v0.1.0 assets. No runtime code, installed applications, credentials, or global configuration was changed.
+
+
+Documentation validation: all 25 shell blocks across the README and installation/onboarding guides pass bash syntax checks; relative file/heading links resolve; package.json and both lockfile version fields agree at 0.1.1. Updated guide text passes the common secret-pattern check. These checks do not execute platform installers, sign in to any account, or establish Windows/Linux runtime support.

@@ -6,6 +6,8 @@ An OpenCode **2.0.32** plugin for debates between GLM 5.3 Flash Free and DeepSee
 
 ## Install and uninstall
 
+**Starting from scratch?** Follow the [macOS, Linux, and Windows/WSL walkthrough](docs/GETTING_STARTED.md) for installing Node, OpenCode, and OpenChamber, signing in, and connecting the interface to the right server.
+
 Requires **OpenCode 2.0.32**, Node.js **24**, npm, and Bash. macOS is tested; native Windows installation is unverified. A separate Bun installation is unnecessary.
 
 Clone this public repository into a permanent folder and preview the free setup:
@@ -29,7 +31,7 @@ The setup creates plugin/command links and merges a private `debate.config.json`
 
 Restart OpenCode through **OpenChamber → Settings → General → Restart OpenCode** after active work finishes, refresh OpenChamber, and start a chat with a model explicitly marked **Free**. The preset configures debate children; it does not restrict your whole OpenCode account to free providers. Keep this repository at its installed path.
 
-**For friends:** [full installation guide](docs/INSTALL.md) · [release ZIP and checksum](https://github.com/JohnLevander/opencode-debate/releases/latest). The guide covers downloads without Git, permissions, smoke tests, updates, and troubleshooting.
+**For friends:** [start-to-finish setup](docs/GETTING_STARTED.md) · [plugin installation guide](docs/INSTALL.md) · [release ZIP and checksum](https://github.com/JohnLevander/opencode-debate/releases/latest). The guide covers downloads without Git, permissions, smoke tests, updates, and troubleshooting.
 
 To uninstall, preview with `bash scripts/install.sh --dry-run`, then run `bash scripts/install.sh --uninstall` and restart OpenCode. Only matching plugin/command links are removed; config, logs, dependencies, and child sessions are retained. The lower-level `scripts/install.sh --apply` creates links only; use `setup:free` for the complete free preset.
 

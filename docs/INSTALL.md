@@ -1,12 +1,14 @@
 # Install opencode-debate with OpenChamber
 
+**New to OpenCode or OpenChamber?** Start with the [macOS, Linux, and Windows/WSL walkthrough](GETTING_STARTED.md), including downloads, sign-in, server connection, and the first debate. This page covers the plugin itself.
+
 This guide uses only `opencode/glm-5.3-flash-free` and `opencode/deepseek-v4.1-flash-free`. No OpenRouter account or API key is needed for this setup. Free-provider availability and JSON adherence vary: a real IEEE 754 debate converged, while a contested debate stopped with partial results after invalid model output.
 
 ## Requirements
 
 - OpenChamber connected to OpenCode **2.0.32**. This plugin uses that version's v2 API; other versions are unverified. Do not replace an existing OpenCode installation automatically.
 - Node.js **24** and npm; Bash for the link installer. A separate Bun installation is unnecessary.
-- macOS or Linux. The automated link/config tests run on macOS; native Windows installation is untested.
+- macOS or Linux. The automated link/config tests run on macOS; native Windows installation is untested; use the documented Windows/WSL route.
 - Both free models available in OpenCode's model picker. Choose a model explicitly marked **Free** for the calling chat too. This installer configures debate children; it does not restrict the rest of your OpenCode account to free providers.
 
 ## Get the files and check them
@@ -27,12 +29,12 @@ npm run setup:free -- --preview
 
 If that folder already exists, follow the update instructions below or choose a different permanent folder; do not clone over it.
 
-Without Git, download [opencode-debate-0.1.0.zip](https://github.com/JohnLevander/opencode-debate/releases/download/v0.1.0/opencode-debate-0.1.0.zip) and its [SHA-256 checksum](https://github.com/JohnLevander/opencode-debate/releases/download/v0.1.0/opencode-debate-0.1.0.zip.sha256). Verify the downloaded ZIP from the folder containing both files:
+Without Git, download [opencode-debate-0.1.1.zip](https://github.com/JohnLevander/opencode-debate/releases/download/v0.1.1/opencode-debate-0.1.1.zip) and its [SHA-256 checksum](https://github.com/JohnLevander/opencode-debate/releases/download/v0.1.1/opencode-debate-0.1.1.zip.sha256). Verify the downloaded ZIP from the folder containing both files:
 
 ```sh
 # macOS
-shasum -a 256 -c opencode-debate-0.1.0.zip.sha256
-# Linux: sha256sum -c opencode-debate-0.1.0.zip.sha256
+shasum -a 256 -c opencode-debate-0.1.1.zip.sha256
+# Linux: sha256sum -c opencode-debate-0.1.1.zip.sha256
 ```
 
 Unzip into `~/dev/` to create `~/dev/opencode-debate`, then run the commands above starting at `cd ~/dev/opencode-debate`. Release ZIPs include source and the lockfile; dependencies are installed locally. Browse [all releases](https://github.com/JohnLevander/opencode-debate/releases) for future versions.
