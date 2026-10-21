@@ -9,7 +9,7 @@ export interface Point {
 }
 export interface Attempt {
   message: string; startedAt: number; endedAt: number; text?: string; reasoning?: string;
-  parsed?: Reply; error?: string; kind: "initial" | "timeout_retry" | "json_repair" | "missing_points" | "rate_limit_retry";
+  parsed?: Reply; error?: string; errorCode?: DebateErrorCode; kind: "initial" | "timeout_retry" | "json_repair" | "missing_points" | "rate_limit_retry" | "provider_retry";
 }
 export interface Turn {
   id: string; round: number; debater: Debater; role: Role; message: string;
@@ -30,6 +30,7 @@ export interface DebateResult {
   contributions?: ContributionScore;
   limits: { minRounds: number; maxRounds: number }; stopChecks: StopCheck[];
   status: DebateStatus; reason: string; rounds: number; answer: string | null;
+  failure?: { code: DebateErrorCode; turnID?: string; debater?: Debater; attempts: number; validationFailures: number };
   points: Point[]; pointHistory: { turnID: string; points: Point[] }[];
   turns: Turn[]; startedAt: number; endedAt: number;
 }
@@ -47,8 +48,9 @@ export interface DebateOptions {
   onTurn?: (turn: Turn) => void; onEvent?: (event: DebateEvent) => void;
   signal?: AbortSignal; random?: () => number; now?: () => number;
 }
+export type DebateErrorCode = "call_timeout" | "total_timeout" | "cancelled" | "rate_limit" | "provider_unavailable" | "protocol" | "transport";
 export class DebateError extends Error {
-  constructor(public code: "call_timeout" | "total_timeout" | "cancelled" | "rate_limit" | "protocol" | "transport", message: string, public retryAfterMs?: number) {
+  constructor(public code: DebateErrorCode, message: string, public retryAfterMs?: number) {
     super(message); this.name = "DebateError";
   }
 }

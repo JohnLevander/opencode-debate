@@ -5,7 +5,7 @@ import { DebateError, type Debater, type DebateResult } from "../core/types.ts";
 import type { DebateConfig } from "../config.ts";
 import { RestrictedRead, type RestrictedReads } from "../restricted-read.ts";
 import type { DebateAdapter, SessionDetail, SessionInterruption } from "./types.ts";
-export { retryAfterMs } from "./http.ts";
+import { providerFailureCode } from "./http.ts";
 export type { SessionDetail } from "./types.ts";
 export type OpenCodeClient = Pick<Plugin.Context, "session" | "model">;
 export const AGENT_ID = "debater";
@@ -16,7 +16,7 @@ export function providerError(error: SessionStructuredError, retryAfter?: number
   const message = /free tier can only be used from within OpenCode/i.test(error.message)
     ? `${nativeMessage} This request already ran inside an OpenCode child session. OpenCode free models have a reported compatibility issue when read/shell tools are disabled; ${readCompatibility ? "restricted empty-file read compatibility mode was enabled, but the gateway still rejected the request." : "these debaters intentionally have all tools disabled."} This error alone does not establish that a paid provider or OpenRouter API key is needed. The debate remains blocked; changing tool permissions requires approval. Upstream: https://github.com/anomalyco/opencode/issues/51241`
     : nativeMessage;
-  return new DebateError(error.status === 429 || /rate.?limit|too many requests/i.test(error.type) ? "rate_limit" : "transport", message, retryAfter);
+  return new DebateError(providerFailureCode(error.status, error.type, error.message), message, retryAfter);
 }
 export class OpenCodeAdapter implements DebateAdapter {
   readonly sessions: SessionDetail[] = [];
@@ -29,7 +29,7 @@ export class OpenCodeAdapter implements DebateAdapter {
   constructor(private ctx: OpenCodeClient, private config: DebateConfig, private parentID: string, private slug: string, private owned: Set<string>, private retryHints = new Map<string, number>(), private restrictedReads: RestrictedReads = new Map()) {}
   setAssignment(value: DebateResult["assignment"]) { this.assignment = value; }
   private async initialize(): Promise<void> {
-    if (!this.assignment) throw new Error("Missing role assignment");
+    if (!this.assignment) throw new DebateError("transport", "Missing role assignment");
     const parent = await this.ctx.session.get({ sessionID: this.parentID });
     const { data: models } = await this.ctx.model.list({ location: { directory: parent.location.directory } });
     for (const debater of ["glm", "deepseek"] as const) {
@@ -40,6 +40,8 @@ export class OpenCodeAdapter implements DebateAdapter {
     }
     const readPolicy = this.config.readCompatibility ? await RestrictedRead.create(parent.location.directory) : undefined;
     for (const debater of ["glm", "deepseek"] as const) {
+      // Re-entry after a partial failure creates only the missing children, never duplicates.
+      if (this.sessions.some(s => s.debater === debater)) continue;
       if (this.closed) throw new DebateError("cancelled", "Debate adapter closed before child creation");
       const selected = this.config.models[debater];
       const role = this.assignment.proposer === debater ? "proposer" : "challenger";
@@ -70,7 +72,7 @@ export class OpenCodeAdapter implements DebateAdapter {
   }
   async cancelAll(): Promise<void> {
     this.closed = true;
-    await Promise.all(this.sessions.map(s => this.interrupt(s.id)));
+    await Promise.all(this.sessions.map(s => { this.retryHints.delete(s.id); return this.interrupt(s.id); }));
   }
   callModel = async (debater: Debater, message: string, signal: AbortSignal): Promise<{ text: string; reasoning?: string }> => {
     if (signal.aborted) throw abortReason(signal);
@@ -93,7 +95,9 @@ export class OpenCodeAdapter implements DebateAdapter {
       };
       if (previous) await previous;
       await check();
-      this.initialization ??= this.initialize();
+      // A transient initialization failure must not poison later attempts: clear the cached
+      // rejection so the next call re-runs idempotent child creation for the missing debater.
+      this.initialization ??= this.initialize().catch(error => { this.initialization = undefined; throw error; });
       await this.initialization;
       child = this.sessions.find(s => s.debater === debater)!;
       await check();
@@ -125,8 +129,15 @@ export class OpenCodeAdapter implements DebateAdapter {
     })();
     const barrier = work.then(() => {}, () => {});
     this.pending.set(debater, barrier);
-    try { return await abortable(work, signal); }
-    finally { signal.removeEventListener("abort", stop); }
+    try {
+      return await abortable(work, signal);
+    } catch (error) {
+      // SDK/network exceptions from the local server are transient connectivity failures the
+      // engine may retry; aborts and typed DebateErrors keep their own classification.
+      if (signal.aborted) throw abortReason(signal);
+      if (error instanceof DebateError) throw error;
+      throw new DebateError("provider_unavailable", "OpenCode server request failed. Check the OpenCode server connection.");
+    } finally { signal.removeEventListener("abort", stop); }
   };
-  release() { for (const s of this.sessions) { this.owned.delete(s.id); this.restrictedReads.delete(s.id); } }
+  release() { for (const s of this.sessions) { this.owned.delete(s.id); this.restrictedReads.delete(s.id); this.retryHints.delete(s.id); } }
 }

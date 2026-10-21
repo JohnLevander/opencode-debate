@@ -1,7 +1,7 @@
 import { randomInt } from "node:crypto";
 import { scoreContributions } from "./contribution.ts";
 import { parseReply } from "./parse.ts";
-import { DebateError, type DebateOptions, type DebateResult, type Debater, type Point, type Reply, type Role, type Turn } from "./types.ts";
+import { DebateError, type DebateEvent, type DebateOptions, type DebateResult, type Debater, type Point, type Reply, type Role, type Turn } from "./types.ts";
 import { openingPrompt, firstCritiquePrompt, critiquePrompt, revisionPrompt, missingPointsPrompt, jsonRepairPrompt, INTERRUPTION_PREFIX } from "../prompts.ts";
 
 export function abortReason(signal: AbortSignal): Error {
@@ -41,6 +41,9 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
     limits: { minRounds, maxRounds: opts.maxRounds }, stopChecks: [],
     status: "error", reason: "Debate did not finish", rounds: 0, answer: null, points: [], pointHistory: [], turns: [], startedAt, endedAt: startedAt,
   };
+  // A throwing host callback (onEvent/onTurn) is a host bug; it must not abort the debate.
+  const emit = (event: DebateEvent) => { try { opts.onEvent?.(event); } catch { /* isolated host callback failure */ } };
+  const publish = (turn: Turn) => { try { opts.onTurn?.(structuredClone(turn)); } catch { /* isolated host callback failure */ } };
   const overall = new AbortController();
   const cancel = () => overall.abort(new DebateError("cancelled", "Debate cancelled by the caller"));
   opts.signal?.addEventListener("abort", cancel, { once: true });
@@ -52,9 +55,10 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
     if (!overall.signal.aborted && now() >= deadline) overall.abort(new DebateError("total_timeout", "Total debate deadline exceeded"));
     if (overall.signal.aborted) throw abortReason(overall.signal);
   };
+  // Budgets belong to the logical turn, including all JSON/missing-point repairs.
+  const budgets = new Map<string, { timedOut: boolean; providerRetries: number }>();
   const invoke = async (turn: Turn, message: string, kind: Turn["attempts"][number]["kind"]): Promise<{ text: string; reasoning?: string }> => {
-    let timedOut = false;
-    let rateAttempts = 0;
+    const budget = budgets.get(turn.id)!;
     for (;;) {
       live();
       const attempt: Turn["attempts"][number] = { message, startedAt: now(), endedAt: now(), kind };
@@ -77,20 +81,30 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
       } catch (error) {
         failure = controller.signal.aborted ? abortReason(controller.signal) : error;
         attempt.error = messageOf(failure);
+        attempt.errorCode = failure instanceof DebateError ? failure.code : "transport";
       } finally {
         attempt.endedAt = now(); clearTimeout(timer); overall.signal.removeEventListener("abort", abort);
       }
       live();
-      if (failure instanceof DebateError && failure.code === "call_timeout" && !timedOut) {
-        timedOut = true; message = `${INTERRUPTION_PREFIX}\n${message}`; kind = "timeout_retry";
-        opts.onEvent?.({ type: "retry", turnID: turn.id, reason: "call_timeout", delayMs: 0 });
+      if (failure instanceof DebateError && failure.code === "call_timeout" && !budget.timedOut) {
+        budget.timedOut = true; message = `${INTERRUPTION_PREFIX}\n${message}`; kind = "timeout_retry";
+        emit({ type: "retry", turnID: turn.id, reason: "call_timeout", delayMs: 0 });
         continue;
       }
       const limited = rateLimit(failure);
-      if (limited && ++rateAttempts < 3) {
-        const waitMs = Math.max(1000 * 2 ** (rateAttempts - 1), limited.retryAfterMs ?? 0);
-        opts.onEvent?.({ type: "retry", turnID: turn.id, reason: "rate_limit", delayMs: waitMs });
-        await delay(Math.min(waitMs, Math.max(0, deadline - now())), overall.signal); live(); kind = "rate_limit_retry"; continue;
+      const unavailable = failure instanceof DebateError && failure.code === "provider_unavailable";
+      if ((limited || unavailable) && budget.providerRetries < 2) {
+        const hint = limited?.retryAfterMs ?? (failure instanceof DebateError ? failure.retryAfterMs : undefined);
+        const retryAfter = typeof hint === "number" && Number.isFinite(hint) && hint >= 0 ? hint : 0;
+        // Long Retry-After values must neither overflow setTimeout nor outlive the deadline;
+        // the logged delay is exactly the delay actually scheduled. A retry that cannot start
+        // before the deadline is neither budgeted nor logged.
+        const remaining = Math.max(0, deadline - now());
+        if (remaining <= 0) { live(); throw failure; }
+        const waitMs = Math.max(1000 * 2 ** budget.providerRetries++, retryAfter);
+        const scheduled = Math.min(waitMs, remaining, 2_147_483_647);
+        emit({ type: "retry", turnID: turn.id, reason: unavailable ? "provider_unavailable" : "rate_limit", delayMs: scheduled });
+        await delay(scheduled, overall.signal); live(); kind = unavailable ? "provider_retry" : "rate_limit_retry"; continue;
       }
       throw failure;
     }
@@ -108,8 +122,9 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
   const takeTurn = async (id: string, round: number, role: Role, message: string): Promise<Turn> => {
     live();
     const turn: Turn = { id, round, role, debater: result.assignment[role], message, startedAt: now(), endedAt: now(), retries: 0, attempts: [] };
+    budgets.set(id, { timedOut: false, providerRetries: 0 });
     result.turns.push(turn);
-    opts.onEvent?.({ type: "turn_start", turn: structuredClone(turn) });
+    emit({ type: "turn_start", turn: structuredClone(turn) });
     let repairedJSON = false, repairedMissing = false;
     let kind: Turn["attempts"][number]["kind"] = "initial";
     try {
@@ -119,31 +134,46 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
         let parsed: Reply;
         try {
           parsed = parseReply(response.text);
-          if (role === "proposer" && !parsed.answer) throw new Error("Proposer must provide a nonempty answer");
-          if (role === "challenger" && parsed.points.some((p) => p.status === "conceded" || p.status === "defended")) throw new Error("Challenger may only use open/resolved/withdrawn");
-          if (role === "challenger") validateChallenger(parsed);
+          // Schema-valid replies stay inspectable in the log even when the role checks below reject them.
           turn.attempts.at(-1)!.parsed = parsed;
+          if (role === "proposer" && !parsed.answer) throw new Error("Proposer must provide a nonempty answer");
+          if (role === "proposer") {
+            for (const point of parsed.points) {
+              if (!points.has(point.id)) throw new Error(`Proposer cannot introduce point ID ${point.id}; only the Challenger may create IDs. Known IDs: ${[...points.keys()].join(", ") || "none"}; when none exist, return points: []`);
+              if (point.status !== "conceded" && point.status !== "defended") throw new Error("Proposer may only use conceded/defended for known points");
+            }
+          }
+          if (role === "challenger" && parsed.answer !== null) throw new Error("Challenger must set answer to null");
+          if (role === "challenger" && parsed.points.some((p) => p.status === "conceded" || p.status === "defended")) throw new Error("Challenger may only use open/resolved/withdrawn");
+          if (role === "challenger") {
+            validateChallenger(parsed);
+            const statuses = new Map([...points.values()].map(p => [p.id, p.status]));
+            for (const point of parsed.points) statuses.set(point.id, point.status as Point["status"]);
+            if (parsed.agrees_with_current_answer && [...statuses.values()].includes("open")) throw new Error("Challenger cannot agree while canonical points remain open; address every open point or set agrees_with_current_answer to false");
+          }
         } catch (error) {
           const reason = messageOf(error);
           turn.attempts.at(-1)!.error = `Invalid reply: ${reason}`;
-          opts.onEvent?.({ type: "validation_failure", turnID: id, at: now(), stage: "reply", reason, repair: !repairedJSON });
+          turn.attempts.at(-1)!.errorCode = "protocol";
+          emit({ type: "validation_failure", turnID: id, at: now(), stage: "reply", reason, repair: !repairedJSON });
           if (repairedJSON) throw new DebateError("protocol", `Invalid reply twice in ${id}: ${reason}`);
-          repairedJSON = true; message = jsonRepairPrompt(role, reason, [...points.keys()], highestID + 1); kind = "json_repair"; continue;
+          repairedJSON = true; message = jsonRepairPrompt(role, reason, snapshot(points), highestID + 1); kind = "json_repair"; continue;
         }
         if (role === "proposer") {
           const addressed = new Set(parsed.points.filter((p) => p.status === "conceded" || p.status === "defended").map((p) => p.id));
           const missing = [...points.values()].filter((p) => p.status === "open" && !addressed.has(p.id)).map((p) => p.id);
           if (missing.length) {
             turn.attempts.at(-1)!.error = `Missing open point IDs: ${missing.join(", ")}`;
-            opts.onEvent?.({ type: "validation_failure", turnID: id, at: now(), stage: "missing_points", reason: turn.attempts.at(-1)!.error!, repair: !repairedMissing });
+            turn.attempts.at(-1)!.errorCode = "protocol";
+            emit({ type: "validation_failure", turnID: id, at: now(), stage: "missing_points", reason: turn.attempts.at(-1)!.error!, repair: !repairedMissing });
             if (repairedMissing) throw new DebateError("protocol", `Proposer still omitted ${missing.join(", ")}`);
-            repairedMissing = true; message = missingPointsPrompt(missing); kind = "missing_points"; continue;
+            repairedMissing = true; message = missingPointsPrompt(missing, snapshot(points)); kind = "missing_points"; continue;
           }
         }
         turn.parsed = parsed; return turn;
       }
     } catch (error) { turn.error = messageOf(error); throw error; }
-    finally { turn.endedAt = now(); opts.onTurn?.(structuredClone(turn)); }
+    finally { turn.endedAt = now(); publish(turn); }
   };
   const applyChallenger = (reply: Reply) => {
     highestID = validateChallenger(reply);
@@ -156,13 +186,13 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
   try {
     if (!opts.question.trim() || !Number.isInteger(opts.maxRounds) || opts.maxRounds < 1 || opts.maxRounds > 8 || !Number.isFinite(opts.callTimeoutMs) || opts.callTimeoutMs <= 0 || !Number.isFinite(opts.totalTimeoutMs) || opts.totalTimeoutMs <= 0) throw new DebateError("protocol", "Invalid debate options");
     if (!Number.isInteger(minRounds) || minRounds < 1 || minRounds > opts.maxRounds) throw new DebateError("protocol", "min_rounds must be an integer from 1 to max_rounds");
-    live(); opts.onEvent?.({ type: "start", assignment: result.assignment });
+    live(); emit({ type: "start", assignment: result.assignment });
     let proposal = await takeTurn("P0", 0, "proposer", openingPrompt(opts.question, opts.context));
     result.answer = proposal.parsed!.answer;
     let previousOpen: string | undefined;
     for (let round = 1; round <= opts.maxRounds; round++) {
       result.rounds = round;
-      const critique = await takeTurn(`C${round}`, round, "challenger", round === 1 ? firstCritiquePrompt(opts.question, opts.context, proposal.text!) : critiquePrompt(proposal.text!, snapshot(points)));
+      const critique = await takeTurn(`C${round}`, round, "challenger", round === 1 ? firstCritiquePrompt(opts.question, opts.context, JSON.stringify(proposal.parsed!)) : critiquePrompt(JSON.stringify(proposal.parsed!), snapshot(points)));
       applyChallenger(critique.parsed!);
       result.pointHistory.push({ turnID: critique.id, points: snapshot(points) });
       const open = [...points.values()].filter((p) => p.status === "open").map((p) => p.id).sort();
@@ -173,7 +203,7 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
         : round === opts.maxRounds ? "max_rounds" : "continue";
       const check: DebateResult["stopChecks"][number] = { turnID: critique.id, round, minimumMet, agrees: critique.parsed!.agrees_with_current_answer,
         openIDs: open, previousOpenIDs: previousOpen === undefined ? null : JSON.parse(previousOpen) as string[], decision };
-      result.stopChecks.push(check); opts.onEvent?.({ type: "stop_check", check: structuredClone(check) });
+      result.stopChecks.push(check); emit({ type: "stop_check", check: structuredClone(check) });
       if (decision !== "continue") {
         result.status = decision;
         result.reason = decision === "converged" ? "Challenger endorses the current answer with no open points"
@@ -181,7 +211,7 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
         break;
       }
       previousOpen = key;
-      proposal = await takeTurn(`P${round}`, round, "proposer", revisionPrompt(critique.text!, snapshot(points)));
+      proposal = await takeTurn(`P${round}`, round, "proposer", revisionPrompt(JSON.stringify(critique.parsed!), snapshot(points)));
       result.answer = proposal.parsed!.answer;
       for (const p of proposal.parsed!.points) {
         const old = points.get(p.id);
@@ -192,11 +222,15 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
   } catch (error) {
     result.status = error instanceof DebateError && error.code === "cancelled" ? "cancelled" : "error";
     result.reason = messageOf(error);
+    const failedTurn = result.turns.at(-1);
+    result.failure = { code: error instanceof DebateError ? error.code : "transport", turnID: failedTurn?.id,
+      debater: failedTurn?.debater, attempts: failedTurn?.attempts.length ?? 0,
+      validationFailures: result.turns.reduce((n, t) => n + t.attempts.filter(a => a.errorCode === "protocol").length, 0) };
   } finally {
     clearTimeout(totalTimer); opts.signal?.removeEventListener("abort", cancel);
     result.points = snapshot(points); result.endedAt = now();
   }
   result.contributions = scoreContributions(result);
-  opts.onEvent?.({ type: "end", result: structuredClone(result) });
+  emit({ type: "end", result: structuredClone(result) });
   return result;
 }

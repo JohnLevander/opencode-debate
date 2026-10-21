@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { OpenCodeAdapter, type OpenCodeClient } from "../src/adapters/opencode.ts";
+import { providerFailureCode } from "../src/adapters/http.ts";
 import { defaults } from "../src/config.ts";
 import { DebateError } from "../src/core/types.ts";
 
@@ -82,10 +83,22 @@ test("child arriving after close is retained for inspection and interrupted", as
 });
 
 test("Retry-After accepts seconds and dates but ignores invalid values", async () => {
-  const { retryAfterMs } = await import("../src/adapters/opencode.ts");
+  const { retryAfterMs } = await import("../src/adapters/http.ts");
   assert.equal(retryAfterMs("3"), 3000);
   assert.equal(retryAfterMs("Thu, 01 Jan 1970 00:00:02 GMT", 1000), 1000);
   assert.equal(retryAfterMs("nonsense"), undefined);
+  assert.equal(retryAfterMs("-1"), undefined);
+  assert.equal(retryAfterMs("1e308"), undefined);
+  assert.equal(retryAfterMs("Infinity"), undefined);
+});
+
+test("Retry-After accepts only plain non-negative decimal seconds", async () => {
+  const { retryAfterMs } = await import("../src/adapters/http.ts");
+  assert.equal(retryAfterMs(" "), undefined);
+  assert.equal(retryAfterMs("0x10"), undefined);
+  assert.equal(retryAfterMs("1e3"), undefined);
+  assert.equal(retryAfterMs("+3"), undefined);
+  assert.equal(retryAfterMs("12"), 12000);
 });
 
 test("server-normalized default variant matches an omitted configured variant", async () => {
@@ -115,4 +128,125 @@ test("other authentication errors keep their original diagnosis", async () => {
   await assert.rejects(adapter.callModel("glm", "question", new AbortController().signal), error => {
     assert.ok(error instanceof DebateError); assert.equal(error.message, "provider.auth: Expired Console credential"); return true;
   });
+});
+
+for (const entry of [
+  { error: { type: "provider.rate-limit", message: "Upstream request failed: Endpoint is unavailable." }, code: "provider_unavailable" },
+  { error: { type: "provider.rate-limit", message: "Upstream request failed: Endpoint is unavailable.", status: 429 }, code: "provider_unavailable" },
+  { error: { type: "provider.error", message: "Temporarily offline", status: 503 }, code: "provider_unavailable" },
+  { error: { type: "provider.rate-limit", message: "Quota exceeded", status: 429 }, code: "rate_limit" },
+  { error: { type: "provider.auth", message: "Endpoint is unavailable", status: 401 }, code: "transport" },
+  { error: { type: "provider.error", message: "Model not found", status: 404 }, code: "transport" },
+] as const) {
+  test(`native errors classify ${JSON.stringify(entry.error)} as ${entry.code}`, async () => {
+    const { adapter, change } = setup();
+    change({ assistantError: entry.error, outcome: "failed" });
+    await assert.rejects(adapter.callModel("glm", "question", new AbortController().signal), error => {
+      assert.ok(error instanceof DebateError); assert.equal(error.code, entry.code);
+      assert.ok(error.message.includes(entry.error.message)); return true;
+    });
+  });
+}
+
+test("HTTP 400 with an outage phrase remains non-retryable transport", () => {
+  assert.equal(providerFailureCode(400, "provider.error", "Upstream request failed: Endpoint is unavailable."), "transport");
+  assert.equal(providerFailureCode(400, "service_unavailable", "provider detail"), "transport");
+});
+
+test("HTTP 404 with an outage phrase remains non-retryable transport", () => {
+  assert.equal(providerFailureCode(404, "provider.error", "Endpoint is unavailable"), "transport");
+  assert.equal(providerFailureCode(404, "overloaded", "provider detail"), "transport");
+});
+
+test("permanent 4xx classifications ignore rate-limit envelope types", () => {
+  assert.equal(providerFailureCode(400, "rate_limit_exceeded", "provider detail"), "transport");
+  assert.equal(providerFailureCode(404, "too_many_requests", "provider detail"), "transport");
+});
+
+test("Anthropic-style overload signals classify as provider_unavailable", () => {
+  assert.equal(providerFailureCode(529, "", ""), "provider_unavailable");
+  assert.equal(providerFailureCode(undefined, "overloaded_error", ""), "provider_unavailable");
+  assert.equal(providerFailureCode(undefined, "", "The API is temporarily overloaded"), "provider_unavailable");
+});
+
+test("auth envelope types outrank transient statuses", () => {
+  assert.equal(providerFailureCode(503, "invalid_api_key", "provider detail"), "transport");
+  assert.equal(providerFailureCode(429, "invalid_api_key", "provider detail"), "transport");
+});
+
+test("Cloudflare origin failures 520-524 classify as provider_unavailable", () => {
+  for (const status of [520, 521, 522, 523, 524]) assert.equal(providerFailureCode(status, "", ""), "provider_unavailable");
+  // Deliberately permanent 5xx stay permanent.
+  assert.equal(providerFailureCode(501, "", ""), "transport");
+  assert.equal(providerFailureCode(505, "", ""), "transport");
+});
+
+test("generic overload wording classifies provider_unavailable without a known subject", () => {
+  assert.equal(providerFailureCode(undefined, "", "The requested model is temporarily unavailable"), "provider_unavailable");
+  assert.equal(providerFailureCode(undefined, "", "Provider is currently overloaded"), "provider_unavailable");
+  assert.equal(providerFailureCode(429, "", "The model is overloaded"), "provider_unavailable");
+  // Wording alone cannot rescue a permanent status.
+  assert.equal(providerFailureCode(404, "", "The model is overloaded"), "transport");
+});
+
+test("native OpenCode adapter preserves a structured 404 containing an outage phrase", async () => {
+  const { adapter, change } = setup();
+  change({ assistantError: { type: "provider.error", message: "Upstream request failed: Endpoint is unavailable.", status: 404 }, outcome: "failed" });
+  await assert.rejects(adapter.callModel("glm", "question", new AbortController().signal), error => {
+    assert.ok(error instanceof DebateError); assert.equal(error.code, "transport");
+    assert.equal(error.message, "provider.error: Upstream request failed: Endpoint is unavailable.");
+    return true;
+  });
+});
+
+test("native adapter recovers from a transient child-creation failure without duplicating children", async () => {
+  const fake = fakeClient(); let failures = 0;
+  const original = fake.raw.session.create;
+  fake.raw.session.create = async (input: any) => { if (++failures === 2) throw new TypeError("socket hang up"); return original(input); };
+  const owned = new Set<string>();
+  const adapter = new OpenCodeAdapter(fake.client, defaults(), "parent", "question-slug", owned);
+  adapter.setAssignment({ proposer: "deepseek", challenger: "glm" });
+  await assert.rejects(adapter.callModel("glm", "question", new AbortController().signal), error => {
+    assert.ok(error instanceof DebateError); assert.equal(error.code, "provider_unavailable"); return true;
+  });
+  const response = await adapter.callModel("glm", "question", new AbortController().signal);
+  assert.match(response.text, /reply 1/);
+  assert.equal(fake.created.length, 2); assert.equal(owned.size, 2);
+});
+
+test("transient SDK failures during prompting classify as retryable provider_unavailable", async () => {
+  const fake = fakeClient(); let failures = 0;
+  const original = fake.raw.session.prompt;
+  fake.raw.session.prompt = async (input: any) => { if (++failures === 1) throw new TypeError("fetch failed"); return original(input); };
+  const adapter = new OpenCodeAdapter(fake.client, defaults(), "parent", "question-slug", new Set());
+  adapter.setAssignment({ proposer: "glm", challenger: "deepseek" });
+  await assert.rejects(adapter.callModel("glm", "question", new AbortController().signal), error => {
+    assert.ok(error instanceof DebateError); assert.equal(error.code, "provider_unavailable"); return true;
+  });
+});
+
+test("a bare caller abort stays an abort, not a retryable provider failure", async () => {
+  const fake = fakeClient();
+  let finishCreate!: () => void;
+  const original = fake.raw.session.create;
+  fake.raw.session.create = async (input: any) => { await new Promise<void>(resolve => { finishCreate = resolve; }); return original(input); };
+  const adapter = new OpenCodeAdapter(fake.client, defaults(), "parent", "question-slug", new Set());
+  adapter.setAssignment({ proposer: "glm", challenger: "deepseek" });
+  const controller = new AbortController();
+  const pending = adapter.callModel("glm", "question", controller.signal);
+  await new Promise(resolve => setImmediate(resolve));
+  controller.abort();
+  await assert.rejects(pending, error => !(error instanceof DebateError && error.code === "provider_unavailable"));
+  finishCreate();
+});
+
+test("release clears captured retry hints for retained child sessions", async () => {
+  const fake = fakeClient(); const hints = new Map<string, number>();
+  const adapter = new OpenCodeAdapter(fake.client, defaults(), "parent", "question-slug", new Set(), hints);
+  adapter.setAssignment({ proposer: "glm", challenger: "deepseek" });
+  await adapter.callModel("glm", "test", new AbortController().signal);
+  for (const child of fake.created) hints.set(child.id, 5000);
+  assert.equal(hints.size, 2);
+  adapter.release();
+  assert.equal(hints.size, 0);
 });

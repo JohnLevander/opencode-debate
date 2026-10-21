@@ -10,6 +10,7 @@ import { DebateError } from "../src/core/types.ts";
 import { DEBATER_SYSTEM, INTERRUPTION_PREFIX } from "../src/prompts.ts";
 import { executeDebate } from "../src/index.ts";
 import { mockCompletions, completion, json } from "./helpers/http.ts";
+import { tempRoot } from "./helpers/temp.ts";
 
 const key = "local-mock-credential";
 function config(baseURL: string) {
@@ -17,8 +18,14 @@ function config(baseURL: string) {
   value.openaiCompatible.baseURL = baseURL; value.openaiCompatible.apiKeyEnv = "DEBATE_TEST_API_KEY";
   return value;
 }
-const reply = (agrees: boolean) => JSON.stringify({ answer: "A tested answer", points: [], agrees_with_current_answer: agrees, confidence: 0.9 });
+const reply = (agrees: boolean) => JSON.stringify({ answer: agrees ? null : "A tested answer", points: [], agrees_with_current_answer: agrees, confidence: 0.9 });
 const signal = () => new AbortController().signal;
+// A real Response whose body stream fails mid-transfer, as when a socket drops after headers arrive.
+function interruptedBody(status: number) {
+  return new Response(new ReadableStream({
+    start(controller) { controller.enqueue(new TextEncoder().encode('{"choices":')); controller.error(new TypeError("read ECONNRESET")); },
+  }), { status, headers: { "Content-Type": "application/json" } });
+}
 
 test("fallback sends authenticated tool-free requests and isolates per-model text history", async t => {
   const server = await mockCompletions(t, (_request, response, n) => json(response, completion(`reply-${n}`,
@@ -130,7 +137,7 @@ test("fallback engine JSON repair retains the malformed assistant reply in its o
 });
 
 test("fallback configuration supports endpoint, key-env and independent model overrides", async () => {
-  await mkdir(".test-runtime", { recursive: true }); const root = await mkdtemp(path.resolve(".test-runtime/fallback-config-"));
+  await mkdir(".test-runtime", { recursive: true }); const root = await tempRoot("fallback-config-");
   const cfg = await loadConfig(root, root, { XDG_CONFIG_HOME: root, OPENCODE_DEBATE_BACKEND: "openai-compatible",
     OPENCODE_DEBATE_BASE_URL: "http://127.0.0.1:1234/v1", OPENCODE_DEBATE_FALLBACK_API_KEY_ENV: "CUSTOM_KEY",
     OPENCODE_DEBATE_FALLBACK_GLM_MODEL_ID: "custom/glm", OPENCODE_DEBATE_FALLBACK_DEEPSEEK_MODEL_ID: "custom/deepseek" });
@@ -150,7 +157,7 @@ for (const scenario of ["converged", "cancelled", "rate_limit", "missing_key"] a
       if (scenario === "cancelled" && n === 2) { controller.abort(); return; }
       json(response, completion(reply(scenario === "rate_limit" ? n === 3 : n === 2), { reasoning: "private local reasoning" }));
     });
-    await mkdir(".test-runtime", { recursive: true }); const root = await mkdtemp(path.resolve(".test-runtime/fallback-"));
+    await mkdir(".test-runtime", { recursive: true }); const root = await tempRoot("fallback-");
     const cfg = config(server.baseURL); cfg.logDir = path.join(root, "logs");
     cfg.openaiCompatible.apiKeyEnv = "OPENCODE_DEBATE_LOCAL_MOCK_KEY";
     await mkdir(path.join(root, ".opencode")); await writeFile(path.join(root, ".opencode/debate.config.json"), JSON.stringify(cfg));
@@ -163,7 +170,7 @@ for (const scenario of ["converged", "cancelled", "rate_limit", "missing_key"] a
     } as unknown as Plugin.Context;
     const output = await executeDebate(ctx, { question: "test", first: "glm", include_transcript: true }, {
       sessionID: "parent", agent: "build", signal: controller.signal, progress: async () => {},
-    }, new Set());
+    }, { owned: new Set(), retryHints: new Map(), restrictedReads: new Map() });
     const status = scenario === "missing_key" ? "error" : scenario === "rate_limit" ? "converged" : scenario;
     assert.match(output, new RegExp(`Debate result: ${status}`));
     assert.match(output, /Proposer: z-ai\/glm-5.3-flash \| Challenger: deepseek\/deepseek-v4.1-flash/);
@@ -173,7 +180,11 @@ for (const scenario of ["converged", "cancelled", "rate_limit", "missing_key"] a
     assert.ok(!logText.includes(key)); assert.ok(!output.includes("private local reasoning"));
     if (scenario !== "missing_key") assert.equal(log.turns[0].reasoning, "private local reasoning");
     if (scenario === "cancelled") assert.equal(log.answer, "A tested answer");
-    if (scenario === "rate_limit") { assert.equal(log.turns[0].retries, 1); assert.equal(server.requests.length, 3); }
+    if (scenario === "rate_limit") {
+      assert.equal(log.turns[0].retries, 1); assert.equal(server.requests.length, 3);
+      assert.equal(log.retryEvents.length, 1); assert.equal(log.retryEvents[0].reason, "rate_limit");
+      assert.equal(log.retryEvents[0].delayMs, 1000); assert.ok(log.retryEvents[0].at > 0);
+    }
     if (scenario === "missing_key") assert.equal(server.requests.length, 0);
   });
 }
@@ -205,3 +216,230 @@ for (const scenario of ["double_timeout", "total_deadline"] as const) {
     assert.equal(result.answer, null); assert.equal(result.turns[0].attempts.length, scenario === "double_timeout" ? 2 : 1);
   });
 }
+
+for (const status of [408, 429, 500, 502, 503, 504, 400, 401, 403, 404, 501]) {
+  test(`fallback HTTP ${status} has an explicit retry classification`, async () => {
+    const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+      (async () => new Response(`never echo ${key}`, { status, headers: { "Retry-After": "4" } })) as typeof fetch);
+    try {
+      await assert.rejects(adapter.callModel("glm", "question", signal()), error => {
+        assert.ok(error instanceof DebateError);
+        assert.equal(error.code, status === 429 ? "rate_limit" : [408, 500, 502, 503, 504].includes(status) ? "provider_unavailable" : "transport");
+        assert.equal(error.retryAfterMs, 4000); assert.ok(!error.message.includes(key)); return true;
+      });
+    } finally { adapter.release(); }
+  });
+}
+
+test("fallback network failures and service error envelopes are retryable without leaking bodies", async () => {
+  for (const request of [
+    async () => { throw new TypeError(`socket closed ${key}`); },
+    async () => Response.json({ error: { code: "503", message: key } }),
+    async () => Response.json({ error: { type: "service_unavailable", message: key } }),
+  ]) {
+    const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key }, request as typeof fetch);
+    try {
+      await assert.rejects(adapter.callModel("glm", "question", signal()), error => {
+        assert.ok(error instanceof DebateError); assert.equal(error.code, "provider_unavailable");
+        assert.ok(!error.message.includes(key)); return true;
+      });
+    } finally { adapter.release(); }
+  }
+});
+
+test("fallback 429 envelope carrying an outage message classifies as provider_unavailable", async () => {
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => Response.json({ error: { code: "429", message: "Upstream request failed: Endpoint is unavailable." } })) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), error => {
+      assert.ok(error instanceof DebateError); assert.equal(error.code, "provider_unavailable");
+      assert.ok(!error.message.includes("Endpoint is unavailable")); return true;
+    });
+  } finally { adapter.release(); }
+});
+
+test("fallback engine recovers from HTTP 503 without appending the failed request to history", async t => {
+  const server = await mockCompletions(t, (_request, response, n) => {
+    if (n === 1) { json(response, { error: { message: key } }, 503); return; }
+    json(response, completion(reply(n === 3)));
+  });
+  const adapter = new OpenAICompatibleAdapter(config(server.baseURL), { DEBATE_TEST_API_KEY: key }); t.after(() => adapter.release());
+  const result = await runDebate({ question: "test", maxRounds: 1, first: "glm", callTimeoutMs: 2000, totalTimeoutMs: 5000, callModel: adapter.callModel });
+  assert.equal(result.status, "converged"); assert.equal(server.requests.length, 3);
+  assert.deepEqual(server.requests[1].body.messages, server.requests[0].body.messages);
+  assert.equal(result.turns[0].attempts[0].errorCode, "provider_unavailable");
+  assert.equal(result.turns[0].attempts[1].kind, "provider_retry");
+});
+
+test("compatible adapter preserves a permanent 404 inside an HTTP-200 error envelope containing an outage phrase", async () => {
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => Response.json({ error: { code: "404", message: "Upstream request failed: Endpoint is unavailable." } })) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), error => {
+      assert.ok(error instanceof DebateError); assert.equal(error.code, "transport");
+      assert.match(error.message, /error envelope/);
+      assert.ok(!error.message.includes("Endpoint is unavailable")); return true;
+    });
+  } finally { adapter.release(); }
+});
+
+test("HTTP 200 followed by a body-stream network failure is provider_unavailable, not invalid JSON", async () => {
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => interruptedBody(200)) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), error => {
+      assert.ok(error instanceof DebateError); assert.equal(error.code, "provider_unavailable");
+      assert.doesNotMatch(error.message, /invalid JSON/); return true;
+    });
+  } finally { adapter.release(); }
+});
+
+test("compatible envelope classifies a 529 overload as provider_unavailable", async () => {
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => Response.json({ error: { code: "529", message: "The API is temporarily overloaded" } })) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), error => {
+      assert.ok(error instanceof DebateError); assert.equal(error.code, "provider_unavailable");
+      assert.ok(!error.message.includes("temporarily overloaded")); return true;
+    });
+  } finally { adapter.release(); }
+});
+
+test("string-valued error envelopes classify by their wording", async () => {
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => Response.json({ error: "The service is temporarily overloaded" })) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), error => {
+      assert.ok(error instanceof DebateError); assert.equal(error.code, "provider_unavailable");
+      assert.ok(!error.message.includes("temporarily overloaded")); return true;
+    });
+  } finally { adapter.release(); }
+});
+
+test("oversized responses are rejected permanently instead of being buffered", async () => {
+  const limit = 16 * 1024 * 1024;
+  const chunk = "x".repeat(5 * 1024 * 1024);
+  for (const body of [new Response("x".repeat(limit + 1)),
+    new Response(new ReadableStream({ start(c) { for (let i = 0; i < 4; i++) c.enqueue(new TextEncoder().encode(chunk)); c.close(); } }))] as Response[]) {
+    const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+      (async () => body) as typeof fetch);
+    try {
+      await assert.rejects(adapter.callModel("glm", "question", signal()), error => {
+        assert.ok(error instanceof DebateError); assert.equal(error.code, "transport");
+        assert.match(error.message, /oversized/); return true;
+      });
+    } finally { adapter.release(); }
+  }
+});
+
+test("an API key containing control characters fails before any request", async () => {
+  let calls = 0;
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: "bad\r\nX-Injected: 1" },
+    (async () => { calls++; return Response.json(completion("ok")); }) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), error => {
+      assert.ok(error instanceof DebateError); assert.equal(error.code, "transport");
+      assert.match(error.message, /control characters/); assert.ok(!error.message.includes("X-Injected")); return true;
+    });
+    assert.equal(calls, 0);
+  } finally { adapter.release(); }
+});
+
+test("compatible envelope classifies Cloudflare 520 as provider_unavailable", async () => {
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => Response.json({ error: { code: "520", message: "Web server returned an unknown error" } })) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), error => {
+      assert.ok(error instanceof DebateError); assert.equal(error.code, "provider_unavailable");
+      return true;
+    });
+  } finally { adapter.release(); }
+});
+
+test("fallback classifies a redirecting endpoint as a permanent configuration error", async t => {
+  const server = await mockCompletions(t, (_request, response) => {
+    response.writeHead(302, { location: "http://127.0.0.1:1/elsewhere" }); response.end();
+  });
+  const adapter = new OpenAICompatibleAdapter(config(server.baseURL), { DEBATE_TEST_API_KEY: key }); t.after(() => adapter.release());
+  await assert.rejects(adapter.callModel("glm", "question", signal()), error => {
+    assert.ok(error instanceof DebateError); assert.equal(error.code, "transport");
+    assert.match(error.message, /redirect/); return true;
+  });
+});
+
+test("debate recovers after one interrupted HTTP-200 body, then completes with validated proposer and challenger replies", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const requests: { messages: { content: string }[] }[] = [];
+  const responses = [interruptedBody(200), Response.json(completion(reply(false))), Response.json(completion(reply(true)))];
+  let calls = 0;
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async (_url, init) => { requests.push(JSON.parse(init!.body as string)); return responses[calls++]; }) as typeof fetch);
+  t.after(() => adapter.release());
+  const result = runDebate({ question: "test", maxRounds: 1, first: "glm", callTimeoutMs: 2000, totalTimeoutMs: 30_000, callModel: adapter.callModel });
+  for (let i = 0; i < 40; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(250); }
+  const r = await result;
+  assert.equal(r.status, "converged"); assert.equal(calls, 3);
+  assert.equal(r.answer, "A tested answer"); assert.equal(r.turns[1].parsed?.agrees_with_current_answer, true);
+  assert.equal(r.turns[0].attempts[0].errorCode, "provider_unavailable");
+  assert.equal(r.turns[0].attempts[1].kind, "provider_retry");
+  assert.deepEqual(requests[1].messages, requests[0].messages);
+});
+
+test("repeated interrupted bodies exhaust the shared provider retry budget after three dispatches, without recording agreement", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let calls = 0;
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => { calls++; return interruptedBody(200); }) as typeof fetch);
+  t.after(() => adapter.release());
+  const events: any[] = [];
+  const result = runDebate({ question: "test", maxRounds: 1, first: "glm", callTimeoutMs: 2000, totalTimeoutMs: 30_000, callModel: adapter.callModel, onEvent: e => events.push(e) });
+  for (let i = 0; i < 40; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(250); }
+  const r = await result;
+  assert.equal(r.status, "error"); assert.equal(calls, 3);
+  assert.equal(r.failure?.code, "provider_unavailable"); assert.equal(r.failure?.attempts, 3);
+  assert.deepEqual(r.turns[0].attempts.map(a => a.kind), ["initial", "provider_retry", "provider_retry"]);
+  assert.deepEqual(events.filter(e => e.type === "retry").map(e => e.reason), ["provider_unavailable", "provider_unavailable"]);
+  assert.equal(r.stopChecks.length, 0); assert.equal(r.contributions?.winner, "undetermined");
+});
+
+test("HTTP 401 with an already-errored body preserves transport classification and the safe HTTP-401 diagnosis", async () => {
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => interruptedBody(401)) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), error => {
+      assert.ok(error instanceof DebateError); assert.equal(error.code, "transport");
+      assert.match(error.message, /HTTP 401/);
+      assert.match(error.message, /Check endpoint, credentials, and model configuration/);
+      assert.doesNotMatch(error.message, /network request failed/); return true;
+    });
+  } finally { adapter.release(); }
+});
+
+test("HTTP 404 with an already-errored body preserves transport classification and the safe HTTP-404 diagnosis", async () => {
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => interruptedBody(404)) as typeof fetch);
+  try {
+    await assert.rejects(adapter.callModel("glm", "question", signal()), error => {
+      assert.ok(error instanceof DebateError); assert.equal(error.code, "transport");
+      assert.match(error.message, /HTTP 404/);
+      assert.match(error.message, /Check endpoint, credentials, and model configuration/);
+      assert.doesNotMatch(error.message, /network request failed/); return true;
+    });
+  } finally { adapter.release(); }
+});
+
+test("debate receiving HTTP 401 with an errored body dispatches once and schedules no provider retry", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let calls = 0;
+  const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
+    (async () => { calls++; return interruptedBody(401); }) as typeof fetch);
+  t.after(() => adapter.release());
+  const events: any[] = [];
+  const result = runDebate({ question: "test", maxRounds: 1, first: "glm", callTimeoutMs: 2000, totalTimeoutMs: 30_000, callModel: adapter.callModel, onEvent: e => events.push(e) });
+  for (let i = 0; i < 40; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(250); }
+  const r = await result;
+  assert.equal(r.status, "error"); assert.equal(calls, 1);
+  assert.equal(events.filter(e => e.type === "retry").length, 0);
+  assert.equal(r.failure?.code, "transport"); assert.equal(r.turns[0].attempts.length, 1);
+  assert.match(r.reason, /HTTP 401/);
+});

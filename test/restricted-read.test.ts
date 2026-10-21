@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile, symlink, unlink } from "node:fs/promises";
+import { writeFile, symlink, unlink } from "node:fs/promises";
 import path from "node:path";
 import type { Plugin } from "@opencode/plugin";
 import { RestrictedRead, registerToolIsolation } from "../src/restricted-read.ts";
@@ -8,10 +8,10 @@ import { EMPTY_READ_NOTICE } from "../src/prompts.ts";
 import { OpenCodeAdapter } from "../src/adapters/opencode.ts";
 import { defaults, loadConfig } from "../src/config.ts";
 import { fakeClient } from "./helpers/fake.ts";
+import { tempRoot } from "./helpers/temp.ts";
 
 async function fixture() {
-  await mkdir(".test-runtime", { recursive: true });
-  const root = await mkdtemp(path.resolve(".test-runtime/read-policy-")); const file = path.join(root, "empty.txt");
+  const root = await tempRoot("read-policy-"); const file = path.join(root, "empty.txt");
   await writeFile(file, ""); return { root, file };
 }
 

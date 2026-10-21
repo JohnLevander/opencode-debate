@@ -7,9 +7,10 @@ import { DEBATER_SYSTEM, TOOL_DESCRIPTION, COMMAND_BODY, COMMAND_DESCRIPTION } f
 import { defaults, loadConfig } from "../src/config.ts";
 import { DebateLog } from "../src/log.ts";
 import { fakeClient } from "./helpers/fake.ts";
+import { tempRoot } from "./helpers/temp.ts";
 import type { Plugin } from "@opencode/plugin";
 
-async function directory() { await mkdir(".test-runtime", { recursive: true }); return mkdtemp(path.resolve(".test-runtime/test-")); }
+async function directory() { return tempRoot("test-"); }
 test("v2 tool registration preserves exact description and hides/isolates debater", async () => {
   const hooks: Record<string, Function> = {}; let agent: any = {}; let tool: any;
   const ctx = {
@@ -49,15 +50,62 @@ test("atomic log writes retain full content and private permissions", async () =
   const contents = JSON.parse(await readFile(log.path, "utf8")); assert.equal(contents.status, "cancelled"); assert.equal(contents.turns[0].reasoning, "private reasoning");
   assert.equal((await stat(log.path)).mode & 0o777, 0o600); assert.equal((await readdir(root)).length, 1);
 });
+test("journal coalesces concurrent updates into a single disk write", async () => {
+  const root = await directory(); const log = new DebateLog(root, "question", {});
+  await log.initialize();
+  const updates = Array.from({ length: 50 }, (_, i) => log.update({ counter: i }));
+  await Promise.all(updates);
+  assert.equal(log.writeCount, 2); // the initialize write plus one coalesced flush
+  assert.equal(JSON.parse(await readFile(log.path, "utf8")).counter, 49);
+  assert.equal((await readdir(root)).length, 1);
+});
 test("tool writes an error log when a model is unavailable", async t => {
   const root = await directory(); const previous = process.env.OPENCODE_DEBATE_LOG_DIR;
   process.env.OPENCODE_DEBATE_LOG_DIR = root; t.after(() => { if (previous === undefined) delete process.env.OPENCODE_DEBATE_LOG_DIR; else process.env.OPENCODE_DEBATE_LOG_DIR = previous; });
   const fake = fakeClient(); fake.raw.model.list = async () => ({ data: [] });
   const ctx = { ...fake.client, location: { directory: root, project: { directory: root } }, app: { version: "2.0.32" } } as unknown as Plugin.Context;
-  const output = await executeDebate(ctx, { question: "test", first: "glm" }, { sessionID: "parent", agent: "build", signal: new AbortController().signal, progress: async () => {} }, new Set());
+  const output = await executeDebate(ctx, { question: "test", first: "glm" }, { sessionID: "parent", agent: "build", signal: new AbortController().signal, progress: async () => {} }, { owned: new Set(), retryHints: new Map(), restrictedReads: new Map() });
   assert.match(output, /Debate result: error/);
   const log = JSON.parse(await readFile(path.join(root, (await readdir(root))[0]), "utf8"));
   assert.equal(log.status, "error"); assert.match(log.reason, /glm-5.3-flash-free.*unavailable/); assert.equal(log.finalResult, output); assert.equal(log.sessions.length, 0);
+});
+
+test("a configuration failure is journaled as configError without a fictional config", async t => {
+  const root = await directory();
+  const env: Record<string, string | undefined> = { XDG_CONFIG_HOME: path.join(root, "config"), XDG_DATA_HOME: root };
+  const previous = { config: process.env.XDG_CONFIG_HOME, data: process.env.XDG_DATA_HOME };
+  process.env.XDG_CONFIG_HOME = env.XDG_CONFIG_HOME; process.env.XDG_DATA_HOME = env.XDG_DATA_HOME;
+  t.after(() => { for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete (process.env as any)[key]; else (process.env as any)[key] = value; } });
+  await mkdir(path.join(root, ".opencode"), { recursive: true });
+  await writeFile(path.join(root, ".opencode/debate.config.json"), JSON.stringify({ defaultMaxRounds: true }));
+  const fake = fakeClient();
+  const ctx = { ...fake.client, location: { directory: root, project: { directory: root } }, app: { version: "2.0.32" } } as unknown as Plugin.Context;
+  const output = await executeDebate(ctx, { question: "test", first: "glm" }, { sessionID: "parent", agent: "build", signal: new AbortController().signal, progress: async () => {} }, { owned: new Set(), retryHints: new Map(), restrictedReads: new Map() });
+  assert.match(output, /Debate result: error/);
+  const logDir = path.join(root, "opencode-debate/debates");
+  const log = JSON.parse(await readFile(path.join(logDir, (await readdir(logDir))[0]), "utf8"));
+  assert.equal(log.status, "error"); assert.match(log.configError, /defaultMaxRounds/);
+  assert.equal("config" in log, false); assert.equal(log.finalResult, output);
+});
+
+test("a synchronously throwing progress callback cannot break the tool", async () => {
+  const root = await directory(); const previous = process.env.OPENCODE_DEBATE_LOG_DIR;
+  process.env.OPENCODE_DEBATE_LOG_DIR = root;
+  try {
+    const fake = fakeClient();
+    const original = fake.raw.session.prompt;
+    fake.raw.session.prompt = async input => {
+      const admitted = await original(input);
+      const content = fake.messages.get(input.sessionID)!.at(-1).content;
+      content[0].text = JSON.stringify({ answer: input.sessionID === "child-0" ? "A valid final answer" : null, points: [], agrees_with_current_answer: fake.prompts.length > 1, confidence: 0.9 });
+      content.splice(1, 1);
+      return admitted;
+    };
+    const ctx = { ...fake.client, location: { directory: root, project: { directory: root } }, app: { version: "2.0.32" } } as unknown as Plugin.Context;
+    const output = await executeDebate(ctx, { question: "test", first: "glm" }, { sessionID: "parent", agent: "build", signal: new AbortController().signal,
+      progress: (() => { throw new Error("host progress bug"); }) as unknown as () => Promise<void> }, { owned: new Set(), retryHints: new Map(), restrictedReads: new Map() });
+    assert.match(output, /Debate result: converged/);
+  } finally { if (previous === undefined) delete process.env.OPENCODE_DEBATE_LOG_DIR; else process.env.OPENCODE_DEBATE_LOG_DIR = previous; }
 });
 
 for (const scenario of ["converged", "cancelled", "timeout"] as const) {
@@ -75,7 +123,7 @@ for (const scenario of ["converged", "cancelled", "timeout"] as const) {
     fake.raw.session.prompt = async input => {
       const admitted = await original(input);
       const content = fake.messages.get(input.sessionID)!.at(-1).content;
-      content[0].text = JSON.stringify({ answer: "A valid final answer", points: [], agrees_with_current_answer: fake.prompts.length > 1, confidence: 0.9 });
+      content[0].text = JSON.stringify({ answer: input.sessionID === "child-0" ? "A valid final answer" : null, points: [], agrees_with_current_answer: fake.prompts.length > 1, confidence: 0.9 });
       content.splice(1, 1);
       if (scenario === "cancelled" && fake.prompts.length > 1) controller.abort();
       return admitted;
@@ -85,7 +133,7 @@ for (const scenario of ["converged", "cancelled", "timeout"] as const) {
     const progress: string[] = [];
     const output = await executeDebate(ctx, { question: "test", first: "glm", include_transcript: true, min_rounds: scenario === "converged" ? 2 : 1 }, {
       sessionID: "parent", agent: "build", signal: controller.signal, progress: async data => { progress.push(String(data.description)); },
-    }, new Set());
+    }, { owned: new Set(), retryHints: new Map(), restrictedReads: new Map() });
     const expected = scenario === "timeout" ? "error" : scenario;
     assert.match(output, new RegExp(`Debate result: ${expected}`));
     const log = JSON.parse(await readFile(path.join(root, (await readdir(root))[0]), "utf8"));
@@ -117,13 +165,16 @@ test("invalid Challenger statuses are logged twice and the partial result cannot
     content.splice(1, 1); return admitted;
   };
   const ctx = { ...fake.client, location: { directory: root, project: { directory: root } }, app: { version: "2.0.32" } } as unknown as Plugin.Context;
-  const output = await executeDebate(ctx, { question: "test", first: "glm" }, { sessionID: "parent", agent: "build", signal: new AbortController().signal, progress: async () => {} }, new Set());
+  const output = await executeDebate(ctx, { question: "test", first: "glm", include_transcript: true }, { sessionID: "parent", agent: "build", signal: new AbortController().signal, progress: async () => {} }, { owned: new Set(), retryHints: new Map(), restrictedReads: new Map() });
   const log = JSON.parse(await readFile(path.join(root, (await readdir(root))[0]), "utf8"));
   assert.equal(log.status, "error"); assert.equal(log.validationFailures.length, 2);
   assert.deepEqual(log.validationFailures.map((e: any) => e.repair), [true, false]);
   assert.equal(log.turns[1].attempts.length, 2); assert.match(log.turns[1].attempts[0].text, /resolved/);
   assert.match(log.validationFailures[0].reason, /New challenger point must be open/);
   assert.equal(log.stopChecks.length, 0); assert.equal(log.contributions.winner, "undetermined");
+  assert.equal(log.failure.code, "protocol"); assert.equal(log.failure.turnID, "C1");
+  assert.equal(log.failure.validationFailures, 2);
+  assert.match(output, /Validated challenger reviews: 0/); assert.match(output, /unvalidated reply/);
   assert.match(output, /Partial answer \(debate incomplete\)/); assert.match(output, /does not establish agreement/);
   assert.ok(!output.includes("### Final answer"));
 });

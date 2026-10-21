@@ -4,7 +4,8 @@ import { defaults, loadConfig, type DebateConfig } from "./config.ts";
 import { runDebate } from "./core/debate.ts";
 import type { Turn } from "./core/types.ts";
 import { DEBATER_SYSTEM, TOOL_DESCRIPTION } from "./prompts.ts";
-import { OpenCodeAdapter, AGENT_ID, MODEL_NAMES, NO_TOOLS, retryAfterMs } from "./adapters/opencode.ts";
+import { OpenCodeAdapter, AGENT_ID, MODEL_NAMES, NO_TOOLS } from "./adapters/opencode.ts";
+import { retryAfterMs, TRANSIENT_STATUSES } from "./adapters/http.ts";
 import { OpenAICompatibleAdapter } from "./adapters/openai-compatible.ts";
 import type { DebateAdapter } from "./adapters/types.ts";
 import { DebateLog } from "./log.ts";
@@ -20,22 +21,33 @@ export const debateArgs = z.object({
 export type DebateArgs = z.input<typeof debateArgs>;
 type Execution = { sessionID: string; agent: string; signal: AbortSignal; progress: (data: Record<string, unknown>) => Promise<void> };
 
-export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, execution: Execution, owned: Set<string>, retryHints = new Map<string, number>(), restrictedReads: RestrictedReads = new Map()): Promise<string> {
+/** Shared plugin-lifetime state every debate needs; required so a call site cannot silently drop wiring. */
+export interface DebateShared { owned: Set<string>; retryHints: Map<string, number>; restrictedReads: RestrictedReads }
+export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, execution: Execution, shared: DebateShared): Promise<string> {
+  const { owned, retryHints, restrictedReads } = shared;
   const args = debateArgs.parse(input);
   let config: DebateConfig = defaults(); let configurationError: unknown;
   try { config = await loadConfig(ctx.location.directory, ctx.location.project.directory); }
   catch (error) { configurationError = error; }
-  const journal = new DebateLog(config.logDir, args.question, { question: args.question, context: args.context, config, args,
-    opencodeVersion: ctx.app.version, parentSessionID: execution.sessionID, limits: { minRounds: args.min_rounds ?? 1, maxRounds: args.max_rounds ?? config.defaultMaxRounds }, validationFailures: [], stopChecks: [], turns: [], pointHistory: [], sessions: [] });
+  // A failed configuration load must not be journaled as if the defaults had been used.
+  const configErrorText = configurationError === undefined ? undefined : configurationError instanceof Error ? configurationError.message : String(configurationError);
+  const journal = new DebateLog(config.logDir, args.question, { question: args.question, context: args.context,
+    ...(configurationError === undefined ? { config } : { configError: configErrorText }), args,
+    opencodeVersion: ctx.app.version, parentSessionID: execution.sessionID, limits: { minRounds: args.min_rounds ?? 1, maxRounds: args.max_rounds ?? config.defaultMaxRounds }, validationFailures: [], retryEvents: [], stopChecks: [], turns: [], pointHistory: [], sessions: [] });
   try { await journal.initialize(); }
   catch (error) { return `## Debate result: error\n### Final answer\nNo answer was gathered.\n### Details\nCannot create the required debate log at ${journal.path}: ${error instanceof Error ? error.message : String(error)}`; }
   const adapter: DebateAdapter = config.backend === "opencode"
     ? new OpenCodeAdapter(ctx, config, execution.sessionID, journal.slug, owned, retryHints, restrictedReads)
     : new OpenAICompatibleAdapter(config);
-  const validationFailures: object[] = []; const stopChecks: object[] = [];
+  const validationFailures: object[] = []; const retryEvents: object[] = []; const stopChecks: object[] = [];
   const turns: Turn[] = []; const pendingWrites: Promise<unknown>[] = [];
   const progress = (message: string) => {
-    const task = Promise.race([execution.progress({ title: "Debate", description: message, status: message }), new Promise<void>(resolve => { const timer = setTimeout(resolve, 1000); timer.unref(); })]).catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>(resolve => { timer = setTimeout(resolve, 1000); timer.unref(); });
+    let update: Promise<void>;
+    try { update = execution.progress({ title: "Debate", description: message, status: message }); }
+    catch { update = Promise.resolve(); } // a throwing host callback must not break the tool
+    const task = Promise.race([update.then(() => {}, () => {}).finally(() => clearTimeout(timer)), timeout]);
     pendingWrites.push(task);
   };
   const save = (patch: Record<string, unknown>) => { const task = journal.update(patch); task.catch(() => {}); pendingWrites.push(task); };
@@ -62,14 +74,18 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
           validationFailures.push(event); save({ validationFailures });
           progress(`${event.turnID}: invalid reply (${event.reason}); ${event.repair ? "requesting one repair" : "stopping after failed repair"}.`);
         } else if (event.type === "stop_check") { stopChecks.push(event.check); save({ stopChecks });
-        } else if (event.type === "retry") progress(`${event.turnID}: retrying after ${event.reason}${event.delayMs ? ` in ${event.delayMs} ms` : ""}.`);
+        } else if (event.type === "retry") {
+          retryEvents.push({ ...event, at: Date.now() }); save({ retryEvents });
+          progress(`${event.turnID}: retrying after ${event.reason}${event.delayMs ? ` in ${event.delayMs} ms` : ""}.`);
+        }
       },
       onTurn(turn) { turns.push(turn); save({ turns, sessions: adapter.sessions }); },
     });
     if (result.status === "cancelled" || result.status === "error") await adapter.cancelAll();
     await Promise.allSettled(pendingWrites);
     const output = renderResult(result, config, journal.path, adapter.sessions, args.include_transcript);
-    await journal.update({ ...result, config, args, sessions: adapter.sessions, diagnostics: adapter.diagnostics, interruptions: adapter.interruptions, finalResult: output });
+    await journal.update({ ...result, ...(configurationError === undefined ? { config } : { config: undefined, configError: configErrorText }),
+      args, sessions: adapter.sessions, diagnostics: adapter.diagnostics, interruptions: adapter.interruptions, finalResult: output });
     progress(`Debate ended: ${result.status}. ${result.rounds} Challenger round(s). Log: ${journal.path}`);
     return output;
   } catch (error) {
@@ -96,7 +112,7 @@ export default Plugin.define({
     await registerToolIsolation(ctx, owned, restrictedReads);
     await ctx.session.hook("http.response", event => {
       if (event.agent !== AGENT_ID && !owned.has(event.sessionID)) return;
-      if (event.response.status === 429) {
+      if ([...TRANSIENT_STATUSES, 429].includes(event.response.status)) { // 429 hints cover genuine rate limits too
         const delay = retryAfterMs(event.response.headers.get("Retry-After"));
         if (delay !== undefined) retryHints.set(event.sessionID, delay);
       }
@@ -107,7 +123,7 @@ export default Plugin.define({
     });
     await ctx.tool.transform(editor => editor.add({
       name: "debate", description: TOOL_DESCRIPTION, input: debateArgs, options: { codemode: true, pinned: true },
-      async execute(input, context) { return { content: await executeDebate(ctx, input, context, owned, retryHints, restrictedReads) }; },
+      async execute(input, context) { return { content: await executeDebate(ctx, input, context, { owned, retryHints, restrictedReads }) }; },
     }));
   },
 });

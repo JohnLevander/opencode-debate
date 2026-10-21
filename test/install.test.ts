@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, readlink, stat, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readlink, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { tempRoot } from "./helpers/temp.ts";
 const repo = path.resolve(".");
 async function fixture() {
-  await mkdir(".test-runtime", { recursive: true });
-  const root = await mkdtemp(path.resolve(".test-runtime/install with spaces-"));
+  const root = await tempRoot("install with spaces-");
   const config = path.join(root, "config/opencode");
   return { root, config, env: { ...process.env, XDG_CONFIG_HOME: path.dirname(config), HOME: root } };
 }

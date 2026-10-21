@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { runDebate } from "../src/core/debate.ts";
 import { parseReply } from "../src/core/parse.ts";
@@ -86,13 +86,19 @@ test("P omitting twice fails without claiming concession", async () => {
   const r = await scripted([json(), json(null, [p()]), json("Forgot"), json("Forgot again")]).result;
   assert.equal(r.status, "error"); assert.match(r.reason, /still omitted C1/); assert.equal(r.points[0].status, "open");
 });
-test("P inventing IDs is ignored", async () => {
-  const r = await scripted([json("Initial", [p("C99", "defended")]), json(null, [p()]), json("Revision", [p("C1", "defended"), p("C99", "conceded")]), json(null, [p()])]).result;
-  assert.equal(r.status, "stalemate"); assert.deepEqual(r.points.map(p => p.id), ["C1"]);
+test("P inventing IDs is rejected before it can contaminate the Challenger prompt", async () => {
+  const { result, calls } = scripted([json("Contaminated", [p("C1", "defended")]), json("Initial"), json(null, [], true)]);
+  const r = await result;
+  assert.equal(r.status, "converged"); assert.deepEqual(r.points, []);
+  assert.match(r.turns[0].attempts[0].error!, /Proposer cannot introduce point ID C1/);
+  assert.match(calls[1].message, /Known IDs: none/); assert.match(calls[1].message, /return points: \[\]/);
+  assert.ok(!calls[2].message.includes("Contaminated"));
+  assert.match(calls[2].message, /All points in this first critique are NEW/);
 });
 test("C omission cannot silently close a point", async () => {
-  const r = await scripted([json(), json(null, [p()]), json("Revision", [p("C1", "conceded")]), json(null, [], true)]).result;
+  const r = await scripted([json(), json(null, [p()]), json("Revision", [p("C1", "conceded")]), json(null, [], true), json(null, [], false)]).result;
   assert.equal(r.status, "stalemate"); assert.equal(r.points[0].status, "open");
+  assert.match(r.turns.at(-1)!.attempts[0].error!, /cannot agree/);
 });
 test("mid-debate cancellation returns collected answer and turns", async () => {
   const controller = new AbortController();
@@ -174,4 +180,169 @@ test("Proposer repair explicitly keeps the role and requires a full answer", asy
   const { result, calls } = scripted([json(null), json(), json(null, [], true)]);
   assert.equal((await result).status, "converged"); assert.match(calls[1].message, /You are the PROPOSER/);
   assert.match(calls[1].message, /Provide your full nonempty answer/);
+});
+
+test("the logged P-ID repair cannot smuggle C IDs into an opening answer", async () => {
+  const { result, calls } = scripted([json("Initial", [p("P1", "defended")]), json("Renamed", [p("C1", "defended")])]);
+  const r = await result;
+  assert.equal(r.status, "error"); assert.equal(r.answer, null); assert.equal(calls.length, 2);
+  assert.equal(r.failure?.code, "protocol"); assert.equal(r.failure?.validationFailures, 2);
+  assert.equal(r.turns.some(t => t.role === "challenger"), false);
+  // The renamed reply stays inspectable on the attempt, but the turn never validates it.
+  assert.equal(r.turns[0].attempts[1].errorCode, "protocol");
+  assert.deepEqual(r.turns[0].attempts[1].parsed?.points.map(x => [x.id, x.status]), [["C1", "defended"]]);
+  assert.equal(r.turns[0].parsed, undefined);
+});
+
+test("revisions cannot invent IDs or resolve a Challenger-owned point", async () => {
+  for (const invalid of [[p("C1", "defended"), p("C2", "conceded")], [p("C1", "resolved")]]) {
+    const { result, calls } = scripted([json(), json(null, [p()]), json("Bad revision", invalid),
+      json("Good revision", [p("C1", "conceded")]), json(null, [p("C1", "resolved")], true)]);
+    const r = await result;
+    assert.equal(r.status, "converged"); assert.equal(r.answer, "Good revision");
+    assert.equal(r.turns[2].attempts[0].errorCode, "protocol");
+    assert.match(calls[3].message, /CANONICAL POINTS/); assert.match(calls[3].message, /Issue C1/);
+    assert.ok(!calls[4].message.includes("Bad revision"));
+  }
+});
+
+test("Challenger answers and contradictory agreement flags require repair", async () => {
+  for (const invalid of [json("I replaced the answer", [], true), json(null, [p()], true)]) {
+    const r = await scripted([json(), invalid, json(null, [], true)]).result;
+    assert.equal(r.status, "converged"); assert.equal(r.answer, "The answer");
+    assert.equal(r.turns[1].attempts[0].errorCode, "protocol"); assert.deepEqual(r.points, []);
+  }
+});
+
+test("prose cannot create IDs or leak into the next model's validated payload", async () => {
+  const { result, calls } = scripted([`I invent C99 in prose.\n${json()}`, json(null, [], true)]);
+  assert.equal((await result).status, "converged"); assert.ok(!calls[1].message.includes("C99"));
+  assert.match(calls[1].message, /CANONICAL POINTS.*authoritative/);
+});
+
+async function advanceTimers(t: TestContext) {
+  for (let i = 0; i < 40; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(250); }
+}
+
+test("provider outages recover with bounded backoff and typed attempts", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const events: any[] = [];
+  const { result } = scripted([new DebateError("provider_unavailable", "Endpoint is unavailable"), json(), json(null, [], true)],
+    { totalTimeoutMs: 30_000, callTimeoutMs: 5000, onEvent: e => events.push(e) });
+  await advanceTimers(t); const r = await result;
+  assert.equal(r.status, "converged"); assert.equal(r.turns[0].attempts[0].errorCode, "provider_unavailable");
+  assert.equal(r.turns[0].attempts[1].kind, "provider_retry");
+  assert.deepEqual(events.filter(e => e.type === "retry").map(e => [e.reason, e.delayMs]), [["provider_unavailable", 1000]]);
+});
+
+test("rate-limit and outage retry budgets do not reset during JSON repair", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const limited = new DebateError("rate_limit", "HTTP 429");
+  const unavailable = new DebateError("provider_unavailable", "Endpoint is unavailable");
+  const { result, calls } = scripted([json(), limited, unavailable, json(null, [p(), p("C2"), p("C3", "resolved")]), unavailable],
+    { totalTimeoutMs: 30_000, callTimeoutMs: 5000 });
+  await advanceTimers(t); const r = await result;
+  assert.equal(r.status, "error"); assert.equal(calls.length, 5); assert.equal(r.turns[1].attempts.length, 4);
+  assert.equal(r.failure?.code, "provider_unavailable"); assert.equal(r.failure?.turnID, "C1");
+  assert.equal(r.failure?.validationFailures, 1); assert.equal(r.answer, "The answer"); assert.deepEqual(r.points, []);
+  assert.equal(r.contributions?.winner, "undetermined");
+  assert.match(calls[4].message, /next unused ID C1/); assert.match(calls[4].message, /Known IDs: none/);
+});
+
+test("timeout retry budget does not reset after a malformed reply", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const never = () => new Promise<{ text: string }>(() => {});
+  const { result, calls } = scripted([never, "malformed", never], { totalTimeoutMs: 30_000, callTimeoutMs: 500 });
+  await advanceTimers(t); const r = await result;
+  assert.equal(r.status, "error"); assert.equal(r.failure?.code, "call_timeout"); assert.equal(calls.length, 3);
+});
+
+test("cancellation interrupts provider backoff without another dispatch", async () => {
+  const controller = new AbortController();
+  const { result, calls } = scripted([new DebateError("provider_unavailable", "outage", 60_000)], {
+    signal: controller.signal, onEvent: e => { if (e.type === "retry") controller.abort(); },
+  });
+  const r = await result; assert.equal(r.status, "cancelled"); assert.equal(calls.length, 1);
+});
+
+test("a throwing host callback cannot abort the debate", async () => {
+  const { result, calls } = scripted([json(), json(null, [], true)], {
+    onEvent: e => { throw new Error(`host bug in ${e.type}`); },
+    onTurn: () => { throw new Error("host bug in onTurn"); },
+  });
+  const r = await result;
+  assert.equal(r.status, "converged"); assert.equal(r.answer, "The answer"); assert.equal(calls.length, 2);
+  assert.equal(r.turns.length, 2); assert.equal(r.stopChecks.length, 1);
+});
+
+test("the Challenger may reopen a resolved point when a later revision regresses", async () => {
+  const r = await scripted([json(), json(null, [p()]), json("Fixed", [p("C1", "conceded")]),
+    json(null, [p("C1", "resolved")], false), json("Regressed", [p("C1", "defended")]), json(null, [p()]),
+    json("Refixed", [p("C1", "conceded")]), json(null, [p("C1", "resolved")], true)]).result;
+  assert.equal(r.status, "converged"); assert.equal(r.rounds, 4); assert.equal(r.answer, "Refixed");
+  assert.equal(r.pointHistory[2].points[0].status, "resolved"); // C2 confirmed the fix
+  assert.equal(r.pointHistory[4].points[0].status, "open");     // C3 explicitly reopened it
+  assert.equal(r.pointHistory[6].points[0].status, "resolved"); // C4 confirmed the re-fix
+  assert.equal(r.points[0].status, "resolved");
+});
+
+test("Retry-After cannot push retries beyond the total deadline", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { result, calls } = scripted([new DebateError("provider_unavailable", "outage", 1e100)], { totalTimeoutMs: 2000 });
+  await advanceTimers(t); const r = await result;
+  assert.equal(r.status, "error"); assert.equal(r.failure?.code, "total_timeout"); assert.equal(calls.length, 1);
+});
+
+test("a retry that cannot start before the deadline is neither logged nor budgeted", async () => {
+  // The injectable clock crosses the total deadline between the post-failure liveness check
+  // and the backoff computation, so no retry can ever be dispatched.
+  let time = 0;
+  const events: any[] = [];
+  const { result, calls } = scripted([new DebateError("provider_unavailable", "Endpoint is unavailable")],
+    { now: () => ++time, totalTimeoutMs: 10, callTimeoutMs: 5000, onEvent: e => events.push(e) });
+  const r = await result;
+  assert.equal(r.status, "error"); assert.equal(r.failure?.code, "total_timeout");
+  assert.equal(calls.length, 1); assert.equal(r.turns[0].attempts.length, 1);
+  assert.equal(events.filter(e => e.type === "retry").length, 0);
+});
+
+test("Retry-After floors the backoff without early retries and is logged as scheduled", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const events: any[] = [];
+  const limited = () => new DebateError("rate_limit", "HTTP 429", 1500);
+  const { result, calls } = scripted([limited(), limited(), limited()], { totalTimeoutMs: 30_000, callTimeoutMs: 5000, onEvent: e => events.push(e) });
+  await advanceTimers(t); const r = await result;
+  assert.equal(r.status, "error"); assert.equal(calls.length, 3);
+  assert.deepEqual(events.filter(e => e.type === "retry").map(e => [e.reason, e.delayMs]), [["rate_limit", 1500], ["rate_limit", 2000]]);
+});
+
+test("provider retry budgets stay shared across the missing-points repair", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { result, calls } = scripted([json(), json(null, [p()]), new DebateError("rate_limit", "HTTP 429"),
+    json("Forgot"), new DebateError("provider_unavailable", "Endpoint is unavailable"), json("Still forgot")],
+    { totalTimeoutMs: 30_000, callTimeoutMs: 5000 });
+  await advanceTimers(t); const r = await result;
+  assert.equal(r.status, "error"); assert.match(r.reason, /still omitted C1/);
+  assert.equal(calls.length, 6);
+  assert.deepEqual(r.turns[2].attempts.map(a => a.kind), ["initial", "rate_limit_retry", "missing_points", "provider_retry"]);
+  assert.deepEqual(r.turns[2].attempts.map(a => a.errorCode), ["rate_limit", "protocol", "provider_unavailable", "protocol"]);
+  assert.deepEqual(r.failure, { code: "protocol", turnID: "P1", debater: "glm", attempts: 4, validationFailures: 2 });
+  assert.equal(r.points[0].status, "open"); assert.equal(r.answer, "The answer");
+});
+
+test("challenger cannot adopt proposer-style transitions for unknown IDs", async () => {
+  const r = await scripted([json(), json(null, [p("C1", "defended")]), json(null, [], true)]).result;
+  assert.equal(r.status, "converged"); assert.deepEqual(r.points, []);
+  assert.match(r.turns[1].attempts[0].error!, /Challenger may only use open\/resolved\/withdrawn/);
+  assert.equal(r.turns[1].attempts[0].errorCode, "protocol");
+  assert.deepEqual(r.turns[1].attempts[0].parsed?.points.map(x => x.status), ["defended"]);
+});
+
+test("proposer prompts never advertise the Challenger's next unused ID", async () => {
+  const { result, calls } = scripted([json("Contaminated", [p("C1", "defended")]), json("Initial"), json(null, [], true)]);
+  await result;
+  assert.ok(!calls[0].message.includes("Next unused ID"));
+  assert.ok(!calls[1].message.includes("Next unused ID"));
+  assert.match(calls[1].message, /only the Challenger may introduce them/);
+  assert.match(calls[2].message, /Next unused ID: C1/);
 });

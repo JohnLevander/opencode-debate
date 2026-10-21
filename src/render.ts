@@ -8,6 +8,11 @@ export function renderResult(result: DebateResult, config: DebateConfig, logPath
   const incomplete = result.status === "error" || result.status === "cancelled";
   const heading = incomplete ? "Partial answer (debate incomplete)" : result.status === "converged" ? "Final answer" : "Current answer (not converged)";
   const lines = [`## Debate result: ${result.status}`, `Proposer: ${name(result.assignment.proposer)} | Challenger: ${name(result.assignment.challenger)} | Rounds: ${result.rounds}`, "", `### ${heading}`, result.answer ?? "No valid answer was gathered before the debate stopped."];
+  if (incomplete) {
+    const reviews = result.turns.filter(t => t.role === "challenger" && t.parsed).length;
+    lines.push("", `Validated challenger reviews: ${reviews}. ${reviews === 0 ? (result.answer ? "The proposer answer has not passed a validated challenger review." : "No challenger review was validated.") : "The debate stopped before reaching a completed result."}`);
+    if (result.failure) lines.push(`Stopped at ${result.failure.turnID ?? "initialization"} (${result.failure.code}); ${result.failure.attempts} attempt(s) in that turn; ${result.failure.validationFailures} rejected reply attempt(s) across the run.`);
+  }
   const contribution = result.contributions;
   if (contribution) {
     const winner = contribution.winner === "tie" ? "Tie" : contribution.winner === "undetermined" ? "Undetermined" : name(contribution.winner);
@@ -20,7 +25,7 @@ export function renderResult(result: DebateResult, config: DebateConfig, logPath
   lines.push("", "### Details", `Reason: ${result.reason}`, `Log: ${logPath}`, `Sessions: ${sessions.length ? sessions.map(s => `${s.title} (${s.id})`).join("; ") : config.backend === "openai-compatible" ? "In-memory fallback conversations; no OpenCode child sessions." : "No child sessions were created."}`);
   if (transcript) {
     lines.push("", "### Transcript");
-    for (const turn of result.turns) lines.push("", `#### ${turn.id} — ${name(turn.debater)} (${turn.role})`, turn.text ?? `No completed reply. ${turn.error ?? ""}`);
+    for (const turn of result.turns) lines.push("", `#### ${turn.id} — ${name(turn.debater)} (${turn.role})${turn.parsed ? "" : " — unvalidated reply"}`, turn.text ?? `No completed reply. ${turn.error ?? ""}`);
   }
   return lines.join("\n");
 }

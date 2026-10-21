@@ -39,7 +39,7 @@ Timeout children: GLM `ses_ea5d62d45ffewmhGR7hbKTNluv`, DeepSeek `ses_ea5d62cfcf
 
 The isolated delay fixture was in the ignored repository `.test-runtime/live-control/.opencode` directory. Its local plugin waited 30 seconds in the debater context hook before dispatch, recording `tools: []`. This exercised genuine SDK waits, engine deadlines, explicit child interruptions, logging, and the OpenChamber Stop action without depending on provider latency. It does **not** establish remote-stream cancellation or real-model agreement. The local `.opencode` fixture directory was renamed to `.opencode-disabled` after the tests so future activation does not load it. Sessions and logs were retained.
 
-Automated isolation remains separate: `npm run check` passes TypeScript and 40 core/adapter/plugin/config/log tests, including scripted convergence, revisions, stalemate, maximum rounds, parser repair, rate limits, timeout/cancellation, ignored SDK signals, and late admission/results. An isolated OpenCode server also verified plugin/agent/command registration before global installation.
+Automated isolation remains separate: `npm run check` passes TypeScript and the full core/adapter/plugin/config/log suite, including scripted convergence, revisions, stalemate, maximum rounds, parser repair, role/ID validation, rate-limit/outage classification (including permanent-status precedence over outage wording and interrupted HTTP-200 bodies) and shared retry budgets across repairs, timeout/cancellation, ignored SDK signals, and late admission/results. An isolated OpenCode server also verified plugin/agent/command registration before global installation.
 
 ## Changes prompted by live testing
 
