@@ -2,9 +2,11 @@
 
 An OpenCode **2.0.32** plugin for debates between GLM 5.3 Flash Free and DeepSeek V4.1 Flash Free, usable from OpenChamber. TypeScript assigns the roles, alternates criticism and revision, validates JSON, tracks points, retries calls, enforces deadlines, and decides when to stop. No model orchestrates the loop.
 
-**Current status:** The free OpenCode backend now has a tested, opt-in **restricted-read compatibility mode**. With that mode enabled in an isolated project, the actual debate tool ran both free models and converged on the IEEE 754 question in one Challenger round through OpenChamber. All 66 automated tests pass. Strict no-tools mode remains the default and still encounters the reported `FreeTierError`. No paid inference has been performed; the selectable OpenAI-compatible fallback remains optional. See [compatibility setup](#free-only-compatibility-mode), the [integration report](docs/INTEGRATION.md), [phase reports](docs/PHASES.md), [API findings](docs/FINDINGS.md), and [specification](docs/SPEC.md).
+**Current status:** The free OpenCode backend now has a tested, opt-in **restricted-read compatibility mode**. With that mode enabled in an isolated project, the actual debate tool ran both free models and converged on the IEEE 754 question in one Challenger round through OpenChamber. The automated checks pass. Strict no-tools mode remains the default and still encounters the reported `FreeTierError`. No paid inference has been performed; the selectable OpenAI-compatible fallback remains optional. See [compatibility setup](#free-only-compatibility-mode), the [integration report](docs/INTEGRATION.md), [phase reports](docs/PHASES.md), [API findings](docs/FINDINGS.md), and [specification](docs/SPEC.md).
 
 ## Install and uninstall
+
+**Sharing with friends:** follow the [free setup guide](docs/INSTALL.md). It includes preview/apply scripts, a smoke test, updates, troubleshooting, and a source ZIP command. No API key is needed for that preset.
 
 Requires Node.js 24 for development/tests and OpenCode 2.0.32 with its embedded Bun runtime. A separate Bun installation is unnecessary.
 
@@ -36,11 +38,23 @@ To remove only those links, preview their paths and approve the removal first, t
 /debate In IEEE 754 double precision, does 0.1 + 0.2 exactly equal 0.3? Explain.
 ```
 
-You can also explicitly ask the current agent to “debate this” or “use debate.” The command expands into a request to call the tool; the calling model performs that initial invocation. The tool description prohibits unsolicited calls. It is an instruction to the calling model, not a perfect deterministic classifier of natural-language consent. In default strict mode, child debaters cannot invoke any tools. The explicitly enabled compatibility mode permits only the native `read` tool for a plugin-owned empty file, as described below.
+You can also explicitly ask the current agent to “debate this” or “use debate.” The tool is pinned in OpenCode's Code Mode catalog so it can be discovered with search. The command expands into a request to call the tool immediately; the calling model performs that initial invocation. The tool description prohibits unsolicited calls. It is an instruction to the calling model, not a perfect deterministic classifier of natural-language consent. In default strict mode, child debaters cannot invoke any tools. The explicitly enabled compatibility mode permits only the native `read` tool for a plugin-owned empty file, as described below.
 
-The tool takes `question`, optional `context`, `max_rounds` (1–8), `first` (`glm`, `deepseek`, or `random`), and `include_transcript` (default false). Random assignment uses Node/Bun crypto; explicit `first` chooses the Proposer. With the OpenCode backend, the two sessions retain separate histories, live under the calling session via `parentID`, and are titled `debate: <slug> | GLM/DeepSeek (proposer/challenger)`. The fallback instead keeps two separate conversations in memory; it creates no OpenCode child sessions. Read its full transcript in the JSON log or set `include_transcript: true`.
+The tool takes `question`, optional `context`, `min_rounds` (1–8, default 1), `max_rounds` (1–8), `first` (`glm`, `deepseek`, or `random`), and `include_transcript` (default false). Random assignment uses Node/Bun crypto; explicit `first` chooses the Proposer. With the OpenCode backend, the two sessions retain separate histories, live under the calling session via `parentID`, and are titled `debate: <slug> | GLM/DeepSeek (proposer/challenger)`. The fallback instead keeps two separate conversations in memory; it creates no OpenCode child sessions. Read its full transcript in the JSON log or set `include_transcript: true`.
 
-Normal completion always ends on the Challenger's review. `converged` means the Challenger endorses the latest answer and no points remain open. `stalemate` means consecutive Challenger turns have identical open-ID sets, starting at C2. `max_rounds` means the review budget was exhausted. The result starts with the latest valid Proposer answer, then unresolved points with both positions, the reason, log path, and child-session IDs. Errors and cancellation preserve collected work. An error before any valid proposal reports that no answer was gathered. OpenChamber's Stop action also aborts the parent step, so the UI shows “Step interrupted” instead of the returned cancellation Markdown; read the JSON log for the partial result.
+To guarantee time for both sides to respond, request a minimum explicitly:
+
+```text
+/debate Is this review correct? Use min_rounds=3 and max_rounds=6.
+```
+
+`min_rounds=3` guarantees at least three completed turns per side before agreement or stalemate can stop the debate: P0, C1, P1, C2, P2, C3. The opening proposal counts as the Proposer's first turn. It does not force disagreement. Errors, cancellation, and deadlines can still stop earlier. The minimum must not exceed `max_rounds` (configured default 4; upper bound 8). These are tool arguments interpreted from the command's natural-language request, not shell flags.
+
+Normal completion always ends on the Challenger's review, once the requested minimum is met. `converged` means the Challenger endorses the latest answer and no points remain open. `stalemate` means consecutive Challenger turns have identical open-ID sets, starting at C2. `max_rounds` means the review budget was exhausted. The result starts with the latest valid Proposer answer (labeled partial on error/cancellation and current on non-convergence), then unresolved points with both positions, the reason, log path, and child-session IDs. Errors and cancellation preserve collected work. An empty validated point list on an incomplete debate does not establish agreement. An error before any valid proposal reports that no answer was gathered. OpenChamber's Stop action also aborts the parent step, so the UI shows “Step interrupted” instead of the returned cancellation Markdown; read the JSON log for the partial result.
+
+The result also includes a **Contribution winner (text-reuse estimate)** line and both models' credited word counts. Deterministic code assigns words in retained five-word phrases to the model that introduced those phrases first in a valid answer or point. Case and punctuation are normalized; a phrase must contain at least three words outside a small English stop-word list. Matching supplied question/context is excluded. Ties are explicit; short/unmatched answers and incomplete errors/cancellations have no declared winner. The log records the method and all counts.
+
+This measures retained wording. It can miss paraphrased ideas, and a largely retained opening answer will favor the Proposer. It does not judge correctness or change convergence, stalemate, or model behavior. Unresolved disagreements remain unresolved regardless of the contribution score.
 
 ## Configuration
 
@@ -123,6 +137,8 @@ Cancellation/deadlines abort active fetches and discard late replies. Disconnect
 
 
 ## Logs and prompt tuning
+
+`limits` records the resolved minimum/maximum. Each accepted Challenger review adds a `stopChecks` entry with its open IDs, previous IDs, agreement flag, whether the minimum was met, and the stop/continue decision. `validationFailures` records each rejected reply, timestamp, turn, and whether its bounded repair was requested. Raw attempts remain in the turn log. The contribution method, counts, and winner are logged too.
 
 Every run checkpoints a JSON file named `<ISO timestamp>-<question-slug>-<run-suffix>.json` in `logDir`. It includes question/context, resolved configuration and role assignment, all attempts and turns (raw final text, parsed JSON, separate reasoning when available, timestamps, retry count/reasons), point history, status/reason, final Markdown, retained child-session details, and interrupt requests/acknowledgments. An interrupt acknowledgment of `false` means that request found no active execution to interrupt; an unstarted Challenger is normally idle. Logs are created with mode `0600`; newly created log directories use `0700`. No API key or authentication-header configuration is logged.
 

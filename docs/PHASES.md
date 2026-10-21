@@ -97,3 +97,10 @@ Errors/cancellation now label retained output partial/incomplete; non-converged 
 
 
 Validation after the repair/logging changes: npm run check passes TypeScript and all 84 tests. Provider availability and successful contested multi-round live-model execution remain separate from these deterministic regression checks.
+
+
+## Friends installation and release packaging
+
+Added docs/INSTALL.md, npm run setup:free preview/apply, and npm run release:zip. The free preset selects only the original two free model IDs with low variants, enables the tested restricted-read mode, preserves other validated debate fields, writes mode 0600 atomically, and uses the existing conflict-refusing link installer. Preview performs no writes. Setup does not modify credentials, OpenCode provider policies, or opencode.json(c); project/server overrides remain explicitly documented. The caller must select a Free model too. Installation is not an account-wide free-provider policy.
+
+Two temporary-home/config tests cover no-write preview, field preservation, private permissions, paths with spaces, repeated installation, matching-link uninstall, and refusal of unrelated/broken links, invalid JSON fields, and symlinked config. npm run check passes TypeScript and all 84 tests. Bash scripts pass syntax checks. The release script requires a clean committed checkout and archives tracked source plus lockfile into a ZIP with a SHA-256 checksum. Dependencies, local test/runtime logs, credentials, caches, and Git history are absent from the package. No public GitHub repository is created or pushed by these scripts.

@@ -11,7 +11,9 @@
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test",
     "generate-command": "node --import tsx scripts/generate-command.ts",
-    "install:preview": "bash scripts/install.sh --dry-run"
+    "install:preview": "bash scripts/install.sh --dry-run",
+    "setup:free": "node --import tsx scripts/setup-free.ts",
+    "release:zip": "bash scripts/release.sh"
   },
   "dependencies": {
     "zod": "4.1.12"
