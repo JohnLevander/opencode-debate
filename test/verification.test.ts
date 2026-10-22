@@ -12,6 +12,7 @@ import { tempRoot } from "./helpers/temp.ts";
 import { fakeClient } from "./helpers/fake.ts";
 import { commandVerifier } from "../src/verifier.ts";
 import { checkEvidence, firstCritiquePrompt, critiquePrompt, jsonRepairPrompt } from "../src/prompts.ts";
+import { parseReply } from "../src/core/parse.ts";
 
 const reply = (answer: string | null) => JSON.stringify({ answer, points: [], agrees_with_current_answer: answer === null, confidence: 1 });
 const base = { question: "Is the async iterator promise unwrapped?", first: "glm", maxRounds: 3, callTimeoutMs: 1000, totalTimeoutMs: 5000 } as const;
@@ -189,4 +190,12 @@ test("an unusable prediction still receives independent runtime observations to 
   const result = await verifier.check({ question: "q", answer: "Prediction was only in free-form prose outside the final answer" }, new AbortController().signal);
   assert.equal(result.status, "inconclusive"); assert.equal(result.checksRun, 0);
   assert.match(result.summary, /Observed JSON: \[true,false\]/); assert.match(result.summary, /INSIDE.*answer/);
+});
+
+test("a broken example inside a completed code fence cannot absorb the valid final reply", () => {
+  const valid = reply("Correct revised prediction");
+  for (const example of ['{"prediction"aption":{"value":1}}', '{"prediction": {', '{"prediction":"unfinished']) {
+    assert.equal(parseReply(`Example draft:\n\`\`\`json\n${example}\n\`\`\`\n\n${valid}`).answer, "Correct revised prediction");
+  }
+  assert.throws(() => parseReply(`${valid}\n{\"wrapper\":\n\`\`\`json\n${valid}\n\`\`\``), "an unfinished outer root remains invalid even when its inner candidate is fenced");
 });

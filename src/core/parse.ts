@@ -15,6 +15,9 @@ export const replySchema = z.object({
 
 /** Detect a real unfinished root before a candidate, without treating inline prose as JSON. */
 function unfinishedRoot(prefix: string): boolean {
+  // A closed Markdown example is independent prose even when its JSON is broken.
+  // Leave unclosed fences intact so an unfinished real wrapper still fails closed.
+  prefix = prefix.replace(/^[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?^[ \t]*\1[ \t]*(?:\n|$)/gm, "");
   let depth = 0, quoted = false, escaped = false, lineStart = true;
   for (const char of prefix) {
     if (depth === 0) {
@@ -37,7 +40,7 @@ function unfinishedRoot(prefix: string): boolean {
 /** Locate the final object backwards so broken prose/draft braces cannot absorb it. */
 export function extractLastObject(text: string): string {
   if (text.length > 1_000_000) throw new Error("Reply exceeds the 1 MB parsing limit");
-  const source = text.replace(/^\s*```(?:json)?\s*$/gim, "");
+  const source = text; // retain fence boundaries for prefix recovery; braces delimit the object itself
   let depth = 0, quoted = false, end = -1;
   for (let i = source.length - 1; i >= 0; i--) {
     const char = source[i];

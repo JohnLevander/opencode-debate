@@ -300,3 +300,9 @@ The later [five maximum-round tests](LOGIC_STRESS.md) completed eight rounds eac
 ## Failure-audit follow-up — 2026-10-22
 
 The [ten-risk audit](FAILURE_AUDIT.md) reproduced ten failing tests before implementation fixes and now passes all 19 new regressions plus the full 259-test suite. The production native guard/adapter now interrupt a child after three denied tools per call; mocked SDK coverage verifies scoping and counter reset. Additional fixes cover JSON recovery, invalid Unicode, retry precedence, observer state/rejection isolation, initial log cleanup, and config path boundaries. The installed plugin was reloaded and reports active without new inference. These changes do not independently verify model answers or replace the earlier live-test observations.
+
+## Independent verification follow-up — 2026-10-22
+
+A locally configured checker now runs outside the debaters, receives only JSON input with the proposed answer, and gates stopping on its strict, bounded verdict. This uses the host's child-process API without new OpenCode SDK capabilities or debater permissions. The included checker executes a fixed trusted Node fixture and compares predicted JSON; it does not evaluate model-written code. Check evidence is bound to an answer hash and finite scope while whole-answer verification remains unverified.
+
+The [five-case live report](VERIFICATION_LIVE.md) records initial failures, feedback fixes, and five complete eight-round reruns whose final predictions all passed independent execution. A malformed closed example before a valid final reply exposed a separate parser false positive, subsequently reproduced and fixed. All 281 tests and TypeScript pass. The [checker contract](VERIFICATION.md) explains configuration, process limits, and the remaining trust/coverage boundaries.
