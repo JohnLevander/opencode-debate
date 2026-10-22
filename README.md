@@ -4,6 +4,8 @@ An OpenCode **2.0.32** plugin for debates between GLM 5.3 Flash Free and DeepSee
 
 **Current status:** The free OpenCode backend has a tested, opt-in **restricted-read compatibility mode**. The installed tool completed the IEEE 754 case and three two-round coding debates through OpenChamber. The coding tests also exposed an incorrect promise-timing claim that both models accepted: agreement is not independent verification. Results now carry that distinction and an original Markdown attachment for the exact output/transcript. The automated checks pass. Strict no-tools mode remains the default and still encounters the reported `FreeTierError`. No paid inference has been performed; the selectable OpenAI-compatible fallback remains optional. See [compatibility setup](#free-only-compatibility-mode), the [integration report](docs/INTEGRATION.md), [phase reports](docs/PHASES.md), [API findings](docs/FINDINGS.md), and [specification](docs/SPEC.md).
 
+The [five maximum-round logic tests](docs/LOGIC_STRESS.md) completed eight rounds each through OpenChamber. They recovered four timeouts and two role repairs, preserved exact transcripts, and exposed another wrong answer surviving model agreement plus a loop of denied read attempts. A direct-core timer-overflow bug found during the audit is fixed; TypeScript and all 240 tests pass. These tests establish exercised behavior, not guaranteed answer accuracy.
+
 ## Install and uninstall
 
 **Starting from scratch?** Follow the [macOS, Linux, and Windows/WSL walkthrough](docs/GETTING_STARTED.md) for installing Node, OpenCode, and OpenChamber, signing in, and connecting the interface to the right server.

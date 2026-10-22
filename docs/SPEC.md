@@ -36,7 +36,7 @@ function runDebate(opts: {
   now?: () => number;              // injectable clock for timeout tests
 }): Promise<DebateResult>;
 ```
-The engine owns all deadlines. For each call it creates an AbortController that fires on callTimeoutMs, on the total deadline, or on overall cancellation, and passes its signal to callModel. Each debater keeps its own conversation (the adapter handles history), so callModel sends only the new message for that debater.
+The engine owns all deadlines. Both timeout values must be integers from 1 through 2,147,483,647 milliseconds in configuration and direct core calls; invalid values fail before dispatch, and an invalid total timer is never armed. For each call it creates an AbortController that fires on callTimeoutMs, on the total deadline, or on overall cancellation, and passes its signal to callModel. Each debater keeps its own conversation (the adapter handles history), so callModel sends only the new message for that debater.
 parse.ts does tolerant JSON extraction (strip code fences, take the LAST JSON object in the text) and schema validation.
 Implements callModel on the v2 plugin client.
 - At debate start, check that both configured models are available, using the mechanism identified in FINDINGS.md. If one is missing (for example, the free promo ended), fail fast with an error naming the model and pointing to the fallback backend in the config.

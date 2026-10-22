@@ -30,6 +30,7 @@ export function rateLimit(error: unknown): { retryAfterMs?: number } | undefined
 }
 const messageOf = (error: unknown) => error instanceof Error ? error.message : String(error);
 const snapshot = (points: Map<string, Point>) => structuredClone([...points.values()]);
+const validTimeout = (ms: number) => Number.isInteger(ms) && ms >= 1 && ms <= 2_147_483_647;
 
 export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
   const minRounds = opts.minRounds ?? 1;
@@ -50,7 +51,10 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
   opts.signal?.addEventListener("abort", cancel, { once: true });
   if (opts.signal?.aborted) cancel();
   const deadline = startedAt + opts.totalTimeoutMs;
-  const totalTimer = setTimeout(() => overall.abort(new DebateError("total_timeout", "Total debate deadline exceeded")), Math.max(0, opts.totalTimeoutMs));
+  // Validate before arming: Node replaces overflowing timeouts with a 1 ms timer.
+  const totalTimer = validTimeout(opts.totalTimeoutMs)
+    ? setTimeout(() => overall.abort(new DebateError("total_timeout", "Total debate deadline exceeded")), opts.totalTimeoutMs)
+    : undefined;
   const points = new Map<string, Point>(); let highestID = 0;
   const live = () => {
     if (!overall.signal.aborted && now() >= deadline) overall.abort(new DebateError("total_timeout", "Total debate deadline exceeded"));
@@ -185,7 +189,7 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
     // Omitted points retain their existing C-authoritative status; omission cannot resolve them.
   };
   try {
-    if (!opts.question.trim() || !Number.isInteger(opts.maxRounds) || opts.maxRounds < 1 || opts.maxRounds > 8 || !Number.isFinite(opts.callTimeoutMs) || opts.callTimeoutMs <= 0 || !Number.isFinite(opts.totalTimeoutMs) || opts.totalTimeoutMs <= 0) throw new DebateError("protocol", "Invalid debate options");
+    if (!opts.question.trim() || !Number.isInteger(opts.maxRounds) || opts.maxRounds < 1 || opts.maxRounds > 8 || !validTimeout(opts.callTimeoutMs) || !validTimeout(opts.totalTimeoutMs)) throw new DebateError("protocol", "Invalid debate options");
     if (!Number.isInteger(minRounds) || minRounds < 1 || minRounds > opts.maxRounds) throw new DebateError("protocol", "min_rounds must be an integer from 1 to max_rounds");
     live(); emit({ type: "start", assignment: result.assignment });
     let proposal = await takeTurn("P0", 0, "proposer", openingPrompt(opts.question, opts.context));

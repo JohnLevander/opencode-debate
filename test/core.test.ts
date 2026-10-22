@@ -366,6 +366,21 @@ test("runDebate validates timeouts before any model call", async () => {
   }
 });
 
+test("direct core calls reject overflowing or fractional timers before dispatch", async () => {
+  for (const field of ["callTimeoutMs", "totalTimeoutMs"] as const) {
+    for (const value of [2_147_483_648, Infinity, 0.5]) {
+      const { result, calls } = scripted([], { [field]: value });
+      const r = await result;
+      assert.equal(calls.length, 0, `${field}=${value} must be rejected before dispatch`);
+      assert.equal(r.failure?.code, "protocol");
+      assert.match(r.reason, /Invalid debate options/);
+    }
+  }
+  const { result, calls } = scripted([json("A"), json(null, [], true)], { callTimeoutMs: 2_147_483_647, totalTimeoutMs: 2_147_483_647 });
+  assert.equal((await result).status, "converged");
+  assert.equal(calls.length, 2, "the maximum supported timer value remains valid");
+});
+
 const synth = (overrides: Partial<DebateResult> = {}): DebateResult => ({
   verification: "not_independently_verified",
   question: "Q", assignment: { proposer: "glm", challenger: "deepseek" }, limits: { minRounds: 1, maxRounds: 4 },
