@@ -9,9 +9,12 @@ export function renderResult(result: DebateResult, config: DebateConfig, logPath
     : `${config.models[debater].providerID}/${config.models[debater].modelID}`;
   const incomplete = result.status === "error" || result.status === "cancelled";
   const check = result.independentChecks?.at(-1);
-  const heading = incomplete ? "Partial answer (debate incomplete)" : result.status === "converged" ? check?.status === "passed" ? "Agreed answer (independent checks passed)" : "Agreed answer (not independently verified)" : "Current answer (not converged)";
+  const heading = incomplete ? "Partial answer (debate incomplete)" : check?.status === "failed" ? "Rejected answer (failed independent checks)"
+    : check?.status === "inconclusive" ? "Proposed answer (independent checks inconclusive)"
+    : result.status === "converged" ? check?.status === "passed" ? "Agreed answer (independent checks passed)" : "Agreed answer (not independently verified)" : "Current answer (not converged)";
   const lines = [`## Debate result: ${result.status}`, `Proposer: ${name(result.assignment.proposer)} | Challenger: ${name(result.assignment.challenger)} | Rounds: ${result.rounds}`,
     check ? "Verification: the full answer is not independently verified. The independent checks below cover only their stated scope; passing finite tests is not proof of every claim." : VERIFICATION_NOTICE,
+    ...(check ? [`Independent checks: ${check.status}. ${check.status === "passed" ? "Scoped checks passed for this exact answer." : "This proposal has not passed the configured independent checks."}`] : []),
     "", `### ${heading}`, result.answer ?? "No valid answer was gathered before the debate stopped."];
   if (check) lines.push("", "### Independent checks", `Status: ${check.status}. Executed checks: ${check.checksRun}. Scope: ${check.scope}.`,
     `Answer SHA-256: ${check.answerSha256}`, check.summary);

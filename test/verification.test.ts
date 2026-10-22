@@ -11,6 +11,7 @@ import { executeDebate } from "../src/index.ts";
 import { tempRoot } from "./helpers/temp.ts";
 import { fakeClient } from "./helpers/fake.ts";
 import { commandVerifier } from "../src/verifier.ts";
+import { checkEvidence, firstCritiquePrompt, critiquePrompt, jsonRepairPrompt } from "../src/prompts.ts";
 
 const reply = (answer: string | null) => JSON.stringify({ answer, points: [], agrees_with_current_answer: answer === null, confidence: 1 });
 const base = { question: "Is the async iterator promise unwrapped?", first: "glm", maxRounds: 3, callTimeoutMs: 1000, totalTimeoutMs: 5000 } as const;
@@ -158,4 +159,34 @@ test("supplied prediction checker executes a trusted fixture and never evaluates
     assert.equal(result.status, prediction ? "passed" : "failed"); assert.equal(result.checksRun, 1); assert.match(result.summary, /Observed JSON/);
   }
   assert.equal((await verifier.check({ question: "q", answer: "No machine-checkable prediction" }, new AbortController().signal)).status, "inconclusive");
+});
+
+test("challenger templates demonstrate literal JSON null instead of a descriptive answer string", () => {
+  for (const prompt of [firstCritiquePrompt("q", undefined, reply("A")), critiquePrompt(reply("A"), []), jsonRepairPrompt("challenger", "answer must be null", [], 1)]) {
+    assert.match(prompt, /"answer":null/); assert.ok(!prompt.includes('"answer":"full current answer, or null for the challenger"'));
+  }
+});
+
+test("verification guidance keeps candidate data inside the final answer and preserves challenger role", async () => {
+  const { result, messages } = run([reply("candidate"), reply(null)], async () => failed, { maxRounds: 1 });
+  const r = await result;
+  assert.match(messages[0], /INSIDE.*answer/);
+  const record = r.independentChecks![0];
+  assert.match(checkEvidence(record, "challenger"), /answer.*null/);
+  assert.match(checkEvidence(record, "proposer"), /INSIDE.*answer/);
+});
+
+test("failed independent checks label a completed proposal rejected before displaying its answer", async () => {
+  const r = await run([reply("wrong"), reply(null)], async () => failed, { maxRounds: 1 }).result;
+  const markdown = renderResult(r, defaults(), "/log", []);
+  assert.match(markdown, /### Rejected answer \(failed independent checks\)/);
+  assert.ok(markdown.indexOf("Independent checks: failed") < markdown.indexOf("\nwrong"));
+});
+
+test("an unusable prediction still receives independent runtime observations to repair it", async () => {
+  const root = await tempRoot("prediction-evidence-"); const fixture = path.join(root, "fixture.mjs"); await writeFile(fixture, "console.log(JSON.stringify([true,false]))");
+  const verifier = commandVerifier({ command: [process.execPath, path.resolve("scripts/verify-node-prediction.mjs"), fixture], scope: "Prediction only", timeoutMs: 2000 }, root);
+  const result = await verifier.check({ question: "q", answer: "Prediction was only in free-form prose outside the final answer" }, new AbortController().signal);
+  assert.equal(result.status, "inconclusive"); assert.equal(result.checksRun, 0);
+  assert.match(result.summary, /Observed JSON: \[true,false\]/); assert.match(result.summary, /INSIDE.*answer/);
 });

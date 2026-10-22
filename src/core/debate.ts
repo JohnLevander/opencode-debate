@@ -3,7 +3,7 @@ import { scoreContributions } from "./contribution.ts";
 import { parseReply } from "./parse.ts";
 import { DebateError, type DebateEvent, type DebateOptions, type DebateResult, type Debater, type IndependentCheck, type Point, type Reply, type Role, type Turn } from "./types.ts";
 import { checkVerdictSchema } from "./verification.ts";
-import { checkEvidence, openingPrompt, firstCritiquePrompt, critiquePrompt, revisionPrompt, missingPointsPrompt, jsonRepairPrompt, INTERRUPTION_PREFIX } from "../prompts.ts";
+import { checkEvidence, VERIFIER_PROPOSAL_GUIDANCE, openingPrompt, firstCritiquePrompt, critiquePrompt, revisionPrompt, missingPointsPrompt, jsonRepairPrompt, INTERRUPTION_PREFIX } from "../prompts.ts";
 
 export function abortReason(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new DebateError("cancelled", "Debate cancelled");
@@ -65,7 +65,7 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
     if (overall.signal.aborted) throw abortReason(overall.signal);
   };
   let latestCheck: IndependentCheck | undefined;
-  const evidence = () => latestCheck ? checkEvidence(latestCheck) : "";
+  const evidence = (role: Role) => latestCheck ? checkEvidence(latestCheck, role) : "";
   const verify = async (turn: Turn) => {
     if (!opts.verifier) return;
     live();
@@ -231,13 +231,13 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
     if (!Number.isInteger(minRounds) || minRounds < 1 || minRounds > opts.maxRounds) throw new DebateError("protocol", "min_rounds must be an integer from 1 to max_rounds");
     if (opts.verifier && (!validTimeout(opts.verifier.timeoutMs) || !opts.verifier.scope.trim() || opts.verifier.scope.length > 1000 || typeof opts.verifier.check !== "function")) throw new DebateError("protocol", "Invalid independent verifier options");
     live(); emit({ type: "start", assignment: result.assignment });
-    let proposal = await takeTurn("P0", 0, "proposer", openingPrompt(opts.question, opts.context));
+    let proposal = await takeTurn("P0", 0, "proposer", openingPrompt(opts.question, opts.context) + (opts.verifier ? `\n${VERIFIER_PROPOSAL_GUIDANCE}` : ""));
     result.answer = proposal.parsed!.answer;
     await verify(proposal);
     let previousOpen: string | undefined;
     for (let round = 1; round <= opts.maxRounds; round++) {
       result.rounds = round;
-      const critique = await takeTurn(`C${round}`, round, "challenger", (round === 1 ? firstCritiquePrompt(opts.question, opts.context, JSON.stringify(proposal.parsed!)) : critiquePrompt(JSON.stringify(proposal.parsed!), snapshot(points))) + evidence());
+      const critique = await takeTurn(`C${round}`, round, "challenger", (round === 1 ? firstCritiquePrompt(opts.question, opts.context, JSON.stringify(proposal.parsed!)) : critiquePrompt(JSON.stringify(proposal.parsed!), snapshot(points))) + evidence("challenger"));
       applyChallenger(critique.parsed!);
       result.pointHistory.push({ turnID: critique.id, points: snapshot(points) });
       const open = [...points.values()].filter((p) => p.status === "open").map((p) => p.id).sort();
@@ -258,7 +258,7 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
         break;
       }
       previousOpen = key;
-      proposal = await takeTurn(`P${round}`, round, "proposer", revisionPrompt(JSON.stringify(critique.parsed!), snapshot(points)) + evidence());
+      proposal = await takeTurn(`P${round}`, round, "proposer", revisionPrompt(JSON.stringify(critique.parsed!), snapshot(points)) + evidence("proposer"));
       result.answer = proposal.parsed!.answer;
       for (const p of proposal.parsed!.points) {
         const old = points.get(p.id);
