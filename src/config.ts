@@ -46,7 +46,8 @@ export async function loadConfig(directory: string, projectRoot = directory, env
   const root = path.resolve(projectRoot);
   while (directories.at(-1) !== root && path.dirname(directories.at(-1)!) !== directories.at(-1)) {
     const parent = path.dirname(directories.at(-1)!);
-    if (!path.relative(root, parent).startsWith("..")) directories.push(parent); else break;
+    const relative = path.relative(root, parent);
+    if (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) directories.push(parent); else break;
   }
   const files = [globalFile, ...directories.reverse().map(d => path.join(d, ".opencode/debate.config.json"))];
   let config: Record<string, unknown> = defaults(env);

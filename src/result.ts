@@ -1,15 +1,17 @@
 import { createHash } from "node:crypto";
 import type { Result } from "@opencode/plugin/promise/tool";
 import type { Message } from "@opencode/ai";
+import { escapeInvalidUnicode } from "./core/unicode.ts";
 
 /** Code Mode collects file parts separately from the calling model's returned text. */
 export function originalResultInfo(markdown: string) {
-  const bytes = Buffer.from(markdown, "utf8");
+  const bytes = Buffer.from(escapeInvalidUnicode(markdown), "utf8");
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   const name = `debate-result-${sha256.slice(0, 12)}.md`;
   return { name, sha256, bytes: bytes.length };
 }
 export function resultWithOriginal(markdown: string): Result {
+  markdown = escapeInvalidUnicode(markdown);
   const originalResult = originalResultInfo(markdown);
   return {
     content: [

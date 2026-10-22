@@ -3,14 +3,21 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Plugin } from "@opencode/plugin";
 import { EMPTY_READ_NOTICE } from "./prompts.ts";
+import { DebateError } from "./core/types.ts";
 
 const emptyFile = fileURLToPath(new URL("../assets/compatibility/empty.txt", import.meta.url));
 type Rule = { action: string; resource: string; effect: "allow" | "deny" };
 export type RestrictedReads = Map<string, RestrictedRead>;
+export const MAX_FORBIDDEN_TOOL_CALLS = 3;
 
 /** Only the genuine built-in read tool, bounded by permissions and an execution guard. */
 export class RestrictedRead {
+  private turns = new Map<string, { controller: AbortController; denials: number }>();
   private constructor(readonly file: string, readonly directory: string, readonly permissions: Rule[]) {}
+  beginTurn(sessionID: string, controller: AbortController): void { this.turns.set(sessionID, { controller, denials: 0 }); }
+  endTurn(sessionID: string, controller: AbortController): void {
+    if (this.turns.get(sessionID)?.controller === controller) this.turns.delete(sessionID);
+  }
   static async create(directory: string, target = emptyFile): Promise<RestrictedRead> {
     const initial = await lstat(target);
     if (!initial.isFile() || initial.isSymbolicLink()) throw new Error("Compatibility read file must be a regular file, not a symlink");
@@ -42,12 +49,20 @@ export class RestrictedRead {
       if (path.dirname(directory) === directory) break;
     }
   }
-  async assertCall(tool: string, input: unknown): Promise<void> {
-    const requested = input && typeof input === "object" && "path" in input ? input.path : undefined;
-    if (tool !== "read" || typeof requested !== "string" || path.resolve(this.directory, requested) !== this.file) {
-      throw new Error("Debater tools are restricted to reading the plugin-owned empty file");
+  async assertCall(tool: string, input: unknown, sessionID?: string): Promise<void> {
+    try {
+      const requested = input && typeof input === "object" && "path" in input ? input.path : undefined;
+      if (tool !== "read" || typeof requested !== "string" || path.resolve(this.directory, requested) !== this.file) {
+        throw new Error("Debater tools are restricted to reading the plugin-owned empty file");
+      }
+      await this.verify();
+    } catch (error) {
+      const turn = sessionID === undefined ? undefined : this.turns.get(sessionID);
+      if (turn && ++turn.denials >= MAX_FORBIDDEN_TOOL_CALLS && !turn.controller.signal.aborted) {
+        turn.controller.abort(new DebateError("protocol", `Debater repeatedly attempted forbidden tools (${turn.denials} denied calls); native turn interrupted`));
+      }
+      throw error;
     }
-    await this.verify();
   }
 }
 
@@ -67,6 +82,6 @@ export async function registerToolIsolation(ctx: Plugin.Context, owned: Set<stri
     if (event.agent !== "debater" && !owned.has(event.sessionID)) return;
     const policy = reads.get(event.sessionID);
     if (!policy) throw new Error("Debater tools are disabled");
-    await policy.assertCall(event.tool, event.input);
+    await policy.assertCall(event.tool, event.input, event.sessionID);
   });
 }

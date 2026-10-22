@@ -1,6 +1,6 @@
 # Specification
 
-Updated 2026-10-21 to reflect the implemented protocol, retry handling, verification labeling, exact-result attachments, and approved follow-ups. The phase plan below records the original delivery sequence; completed phases and later approvals are documented in [PHASES.md](PHASES.md). [README.md](../README.md) is the current usage/configuration reference. [FINDINGS.md](FINDINGS.md) records the pinned OpenCode 2.0.32 API investigation; its early implementation proposals are historical.
+Updated 2026-10-22 to reflect the implemented protocol, retry handling, verification labeling, exact-result attachments, and [failure audit](FAILURE_AUDIT.md). The phase plan below records the original delivery sequence; completed phases and later approvals are documented in [PHASES.md](PHASES.md). [README.md](../README.md) is the current usage/configuration reference. [FINDINGS.md](FINDINGS.md) records the pinned OpenCode 2.0.32 API investigation; its early implementation proposals are historical.
 
 When I explicitly ask for a debate, a debate tool randomly assigns GLM 5.3 Flash Free and DeepSeek V4.1 Flash Free to the roles of Proposer and Challenger. The two models alternate critique and revision, and the tool returns either a converged answer or a clear list of points they still disagree on. All loop control (randomness, round counting, convergence and stalemate detection, JSON parsing, retries, deadlines, logging) is deterministic TypeScript. No LLM orchestrates the loop.
 
@@ -37,7 +37,7 @@ function runDebate(opts: {
 }): Promise<DebateResult>;
 ```
 The engine owns all deadlines. Both timeout values must be integers from 1 through 2,147,483,647 milliseconds in configuration and direct core calls; invalid values fail before dispatch, and an invalid total timer is never armed. For each call it creates an AbortController that fires on callTimeoutMs, on the total deadline, or on overall cancellation, and passes its signal to callModel. Each debater keeps its own conversation (the adapter handles history), so callModel sends only the new message for that debater.
-parse.ts does tolerant JSON extraction (strip code fences, take the LAST JSON object in the text) and schema validation.
+parse.ts does tolerant JSON extraction (strip code fences, take the LAST JSON object in the text) and schema validation. Backward extraction recovers a valid final reply after unfinished inline prose/code braces or draft examples, while rejecting trailing truncated replies and complete inner replies inside unfinished root objects. Semantic answer/summary/note strings must have well-formed Unicode; invalid code units enter the ordinary repair path.
 Implements callModel on the v2 plugin client.
 - At debate start, check that both configured models are available, using the mechanism identified in FINDINGS.md. If one is missing (for example, the free promo ended), fail fast with an error naming the model and pointing to the fallback backend in the config.
 - Create one child session per debater: parentID = the calling session, with that debater's model and the debater agent set at creation.
@@ -57,6 +57,8 @@ Loads debate.config.json from a location that follows v2 conventions (document i
 The plugin defines a hidden agent named debater through `ctx.agent.transform`, with all tools disabled by default (including debate itself, every built-in tool, and any MCP or plugin tools).
 
 The approved, default-off `readCompatibility` exception exposes only genuine native read for the plugin-owned empty asset, with path/content/symlink/instruction-file guards; see the [permission scope](../README.md#free-only-compatibility-mode). The following prompt descriptions summarize the protocol; the exact current system prompt, tool description, command body, and turn/repair templates live in `src/prompts.ts`.
+
+Three denied tool attempts within one native call abort that call, interrupt only its child, and produce a permanent protocol failure with partial results. The denial count resets per call and is isolated between children/debates. Allowed empty-file reads retain the usual deadline bounds.
 
 Agent prompt summary:
 
@@ -96,13 +98,15 @@ Returned answer = P's latest "answer" (P0's answer if the debate converged at C1
 - Invalid JSON/protocol: re-prompt once with the role, validation error, canonical state, and required format. A second invalid reply ends the turn with a protocol failure. One separate missing-point repair is allowed.
 - Provider retries: rate limits and outages share at most two retries per logical turn. These budgets, and the single timeout retry, remain shared across JSON/protocol and missing-point repairs, allowing at most six dispatched attempts per turn. Backoff starts at one second and doubles; cancellation and the total deadline bound waiting. No retry automatically switches the model or backend.
 - Retry classification: HTTP 429 is retryable; outage wording can classify it as provider unavailable. HTTP 408/500/502/503/504/529 and 520–524 are provider outages. Authentication/configuration failures and other permanent HTTP statuses stop immediately. Statusless envelopes recognize unavailable/overloaded wording, endpoint/service/upstream-unavailable, gateway-timeout/bad-gateway types, and rate-limit wording. Native OpenCode-server network failures and interrupted HTTP-200 bodies feed the same provider retry budget. Native SDK request errors with HTTP status follow that classification; declared SDK request rejections, malformed responses, local restricted-read guard failures, and unexpected programming errors stop permanently. A failed guard preserves its diagnostic and creates no children; it is not relabeled as a connectivity outage.
+- Explicit permanent HTTP statuses, including non-listed 5xx such as 501, outrank envelope wording/types. A typed `DebateError` code outranks legacy `status`/`statusCode` retry fields.
 - Retry hints: a valid `Retry-After` header wins over top-level or nested `error.retry_after` body seconds. Retryable HTTP errors without a valid header inspect at most 64 KiB of body with a one-second budget; malformed, oversized, interrupted, or stalled bodies retain the known HTTP classification and use default backoff. Permanent HTTP errors skip body inspection. HTTP-200 error envelopes also support body hints. Error bodies are never echoed into errors/logs. Header parsing accepts padded plain decimal seconds or HTTP-dates; finite delays are clamped to the remaining deadline and timer range.
 - Cancellation: when the tool's execution abort signal fires, abort the engine, which interrupts both child sessions, and return a partial result with status cancelled.
-- Initialize the required private log before dispatch, and checkpoint errors/cancellation. If initialization fails, return a clear journal error without dispatching a model request. Disk/process failures can prevent a final log.
+- Initialize the required private log before dispatch, and checkpoint errors/cancellation. If initialization fails, return a clear journal error without dispatching a model request and remove the newly created placeholder where possible. An existing colliding journal is preserved. Disk/process failures can prevent a final log or cleanup.
 - Two child sessions per debate (parentID = the calling session), titled "debate: <slug> | GLM (proposer)" and "debate: <slug> | DeepSeek (challenger)", with the roles filled in to match the actual assignment.
 - Don't delete them afterward; I want to be able to inspect them.
 Report through the execution context's progress mechanism at debate start, before each turn, and at the end. Example: "Round 2/4: DeepSeek (challenger) reviewing the revision."
 Throwing, rejecting, non-Promise, or stalled progress callbacks cannot break the result. Pending progress updates have a one-second wait budget.
+Core `onEvent`/`onTurn` observers receive copies, cannot mutate engine state, and have synchronous throws and asynchronous rejections isolated. Their returned Promises are never awaited.
 Args (Zod, per v2 conventions):
 - question: trimmed nonempty string (required; at most 100,000 characters)
 - context: string (optional; at most 300,000 characters; background material for both debaters)
@@ -113,6 +117,7 @@ Args (Zod, per v2 conventions):
 Original description (extended by the current `TOOL_DESCRIPTION` in `src/prompts.ts` to cover minimum rounds, contribution scores, incomplete results, verification, and attachments):
 Run a structured debate between two models (GLM 5.3 Flash and DeepSeek V4.1 Flash) on a question, returning their converged answer or the specific points they still disagree on. Call ONLY when the user explicitly asks for a debate (e.g. "debate this", "use debate", /debate). Never call it on your own initiative. When it returns, present the result as given: the final answer first, then any unresolved points with both sides' positions. Do not add your own verdict on unresolved points or re-argue them unless the user asks.
 The engine-facing `executeDebate` returns a Markdown string. The registered v2 tool wraps it in a supported `Result` containing a text part and an identical base64 `text/markdown` file part. Tool metadata contains `verification: "not_independently_verified"` and `originalResult: { name, sha256, bytes }`, where bytes is the UTF-8 byte count. Code Mode collects the file separately from caller-generated text, preserving an exact result even if the caller rewrites its chat reply. A context hook substitutes a text reference only for matching original-result attachments in provider input; the stored/UI file remains intact. Other attachments are unchanged.
+Lone UTF-16 surrogates in unvalidated text/diagnostics are rendered as visible `\uXXXX` escapes before constructing canonical Markdown, hashing, or UTF-8 attachment encoding. JSON journals preserve raw code units; valid Unicode is unchanged.
 ```
 ## Debate result: <converged | stalemate | max_rounds | cancelled | error>
 Proposer: <model> | Challenger: <model> | Rounds: <n>

@@ -22,7 +22,7 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
   return abortable(new Promise<void>((resolve) => { timer = setTimeout(resolve, ms); }), signal).finally(() => clearTimeout(timer));
 }
 export function rateLimit(error: unknown): { retryAfterMs?: number } | undefined {
-  if (error instanceof DebateError && error.code === "rate_limit") return { retryAfterMs: error.retryAfterMs };
+  if (error instanceof DebateError) return error.code === "rate_limit" ? { retryAfterMs: error.retryAfterMs } : undefined;
   if (error && typeof error === "object") {
     const e = error as { status?: number; statusCode?: number; code?: string; retryAfterMs?: number };
     if (e.status === 429 || e.statusCode === 429 || e.code === "rate_limit") return { retryAfterMs: e.retryAfterMs };
@@ -43,9 +43,12 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
     limits: { minRounds, maxRounds: opts.maxRounds }, stopChecks: [],
     status: "error", reason: "Debate did not finish", rounds: 0, answer: null, points: [], pointHistory: [], turns: [], startedAt, endedAt: startedAt,
   };
-  // A throwing host callback (onEvent/onTurn) is a host bug; it must not abort the debate.
-  const emit = (event: DebateEvent) => { try { opts.onEvent?.(event); } catch { /* isolated host callback failure */ } };
-  const publish = (turn: Turn) => { try { opts.onTurn?.(structuredClone(turn)); } catch { /* isolated host callback failure */ } };
+  // Observers receive copies, and neither sync throws nor rejected async callbacks escape.
+  const observe = <T>(callback: ((value: T) => void) | undefined, value: T) => {
+    try { void Promise.resolve(callback?.(structuredClone(value))).catch(() => {}); } catch { /* isolated observer failure */ }
+  };
+  const emit = (event: DebateEvent) => observe(opts.onEvent, event);
+  const publish = (turn: Turn) => observe(opts.onTurn, turn);
   const overall = new AbortController();
   const cancel = () => overall.abort(new DebateError("cancelled", "Debate cancelled by the caller"));
   opts.signal?.addEventListener("abort", cancel, { once: true });

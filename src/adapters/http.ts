@@ -21,8 +21,8 @@ export function providerFailureCode(status?: number, type = "", message = ""): D
   if (status === 429) return OUTAGE_MESSAGE.test(message) || OUTAGE_TYPE.test(type) ? "provider_unavailable" : "rate_limit";
   // Any other concrete 4xx is permanent; outage or rate-limit wording cannot make 400/404 retryable.
   if (status !== undefined && status >= 400 && status < 500) return "transport";
-  // Beyond 4xx (e.g. 501), an explicit rate-limit type still wins; statusless envelopes classify by wording alone.
-  if (status !== undefined) return RATE_LIMIT_TYPE.test(type) ? "rate_limit" : "transport";
+  // Other concrete statuses stay permanent even if the envelope says rate-limit.
+  if (status !== undefined) return "transport";
   return OUTAGE_MESSAGE.test(message) || OUTAGE_TYPE.test(type) ? "provider_unavailable"
     : RATE_LIMIT_TYPE.test(type) || RATE_LIMIT_TYPE.test(message) ? "rate_limit" : "transport";
 }

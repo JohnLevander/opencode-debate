@@ -2,6 +2,8 @@
 
 Tested October 21, 2026 (America/New_York), using deployment commit `d72cbfd`, OpenCode 2.0.32, and the running OpenChamber front end. The installed plugin and command point to this repository. The five actual `/debate` calls ran concurrently with the original free models, low variants, `min_rounds: 8`, `max_rounds: 8`, and `include_transcript: true`. Eight is the supported maximum. Calls had 180-second deadlines and each debate had a 30-minute total deadline. Independent expected results were withheld from the models.
 
+This report preserves that deployment's observations. The October 22 [failure audit](FAILURE_AUDIT.md) subsequently added a third-denial interrupt for forbidden tools and fixed six other implementation areas; its deterministic tests do not replace these live-model results.
+
 ## Results
 
 All five engines reported **converged** after P0/C1/P1/…/P7/C8: 80 validated replies across 40 Challenger rounds. That status records agreement, not correctness. All parent and child sessions finished idle, reported zero cost, and retained the original model selections. Four call timeouts recovered within the existing single-timeout budgets; SQL needed two bounded role/status repairs. There were 86 adapter attempts in total; a native attempt can include additional model steps and tool attempts.
@@ -44,11 +46,11 @@ for await (const value of iterator) {
 
 The models correctly resolved separate closure/exhaustion/continue errors but left this central error unchallenged. They correctly predicted the original body error winning over a closing error on throw, and the closing error winning on break. Eight rounds and high confidence did not establish correctness. The deterministic `not_independently_verified` notice remained present; no automatic code-execution verification is claimed.
 
-### Repeated forbidden reads waste runtime — bounded, not eliminated
+### Repeated forbidden reads waste runtime — historical behavior
 
 Native child histories show **88 attempted reads, all denied before execution**: 82 in the iterator case, one in SQL, and five in the parser case. No file contents were returned. Of the iterator case's 82 denials, 63 occurred during one GLM turn before its 180-second deadline; the timeout interrupted that turn, and the retry subsequently completed. The other 19 denials occurred in other turns. The other cases had no successful debater tools either.
 
-This is a model tool-use/runtime limitation of advertising native read for free-tier compatibility. The guard held, but its denial does not itself stop repeated attempts. The call/total deadlines bound the loop; this change does not add a new denial-count policy or relax permissions. Individual tool attempts remain in native child histories, while the debate journal records logical attempts, final replies, and timeout/repair events. Do not interpret the journal's turn count as the number of native model/tool steps.
+In the tested deployment, this was a model tool-use/runtime limitation of advertising native read for free-tier compatibility. The guard held, but denial alone did not stop repeated attempts; call/total deadlines bounded the loop. The October 22 follow-up now interrupts after three execution-guard denials per native call without relaxing permissions. See its [test evidence and limits](FAILURE_AUDIT.md). Individual tool attempts remain in native child histories, while the debate journal records logical attempts, final replies, and timeout/repair events. Do not interpret the journal's turn count as the number of native model/tool steps.
 
 ### Smaller factual and protocol errors
 

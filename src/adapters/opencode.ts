@@ -96,10 +96,13 @@ export class OpenCodeAdapter implements DebateAdapter {
     this.closed = true;
     await Promise.all(this.sessions.map(s => { this.retryHints.delete(s.id); return this.interrupt(s.id); }));
   }
-  callModel = async (debater: Debater, message: string, signal: AbortSignal): Promise<{ text: string; reasoning?: string }> => {
+  callModel = async (debater: Debater, message: string, outerSignal: AbortSignal): Promise<{ text: string; reasoning?: string }> => {
+    const toolViolation = new AbortController();
+    const signal = AbortSignal.any([outerSignal, toolViolation.signal]);
     if (signal.aborted) throw abortReason(signal);
     if (this.closed) throw new DebateError("cancelled", "Debate adapter is closed");
     let child: SessionDetail | undefined;
+    let readPolicy: RestrictedRead | undefined;
     const stop = () => {
       const current = child ?? this.sessions.find(s => s.debater === debater);
       if (current) void this.interrupt(current.id);
@@ -127,6 +130,8 @@ export class OpenCodeAdapter implements DebateAdapter {
       await this.ctx.session.wait({ sessionID: child.id }); await check();
       const before = await this.ctx.session.context({ sessionID: child.id }); await check();
       this.retryHints.delete(child.id);
+      readPolicy = this.restrictedReads.get(child.id);
+      readPolicy?.beginTurn(child.id, toolViolation);
       const admitted = await this.ctx.session.prompt({ sessionID: child.id, text: message, delivery: "queue" }); await check();
       await this.ctx.session.wait({ sessionID: child.id }); await check();
       const [messages, state] = await Promise.all([this.ctx.session.context({ sessionID: child.id }), this.ctx.session.get({ sessionID: child.id })]);
@@ -157,7 +162,10 @@ export class OpenCodeAdapter implements DebateAdapter {
       if (signal.aborted) throw abortReason(signal);
       if (error instanceof DebateError) throw error;
       throw requestError(error);
-    } finally { signal.removeEventListener("abort", stop); }
+    } finally {
+      signal.removeEventListener("abort", stop);
+      if (child) readPolicy?.endTurn(child.id, toolViolation);
+    }
   };
   release() { for (const s of this.sessions) { this.owned.delete(s.id); this.restrictedReads.delete(s.id); this.retryHints.delete(s.id); } }
 }

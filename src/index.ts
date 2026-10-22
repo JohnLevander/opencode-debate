@@ -12,6 +12,7 @@ import { DebateLog } from "./log.ts";
 import { registerToolIsolation, type RestrictedReads } from "./restricted-read.ts";
 import { renderResult, VERIFICATION_NOTICE } from "./render.ts";
 import { originalResultInfo, resultWithOriginal, withoutOriginalAttachments } from "./result.ts";
+import { escapeInvalidUnicode } from "./core/unicode.ts";
 
 export const debateArgs = z.object({
   question: z.string().trim().min(1).max(100_000), context: z.string().max(300_000).optional(),
@@ -36,7 +37,7 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
     ...(configurationError === undefined ? { config } : { configError: configErrorText }), args,
     opencodeVersion: ctx.app.version, parentSessionID: execution.sessionID, limits: { minRounds: args.min_rounds ?? 1, maxRounds: args.max_rounds ?? config.defaultMaxRounds }, validationFailures: [], retryEvents: [], stopChecks: [], turns: [], pointHistory: [], sessions: [] });
   try { await journal.initialize(); }
-  catch (error) { return `## Debate result: error\n${VERIFICATION_NOTICE}\n### Partial answer (debate incomplete)\nNo answer was gathered.\n### Details\nCannot create the required debate log at ${journal.path}: ${error instanceof Error ? error.message : String(error)}`; }
+  catch (error) { return escapeInvalidUnicode(`## Debate result: error\n${VERIFICATION_NOTICE}\n### Partial answer (debate incomplete)\nNo answer was gathered.\n### Details\nCannot create the required debate log at ${journal.path}: ${error instanceof Error ? error.message : String(error)}`); }
   const adapter: DebateAdapter = config.backend === "opencode"
     ? new OpenCodeAdapter(ctx, config, execution.sessionID, journal.slug, owned, retryHints, restrictedReads)
     : new OpenAICompatibleAdapter(config);
@@ -93,7 +94,7 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
     await adapter.cancelAll();
     const reason = error instanceof Error ? error.message : String(error);
     const status = execution.signal.aborted ? "cancelled" : "error";
-    const output = `## Debate result: ${status}\n${VERIFICATION_NOTICE}\n### Partial answer (debate incomplete)\nSee the partial transcript in the log.\n### Details\nReason: ${reason}\nLog: ${journal.path}`;
+    const output = escapeInvalidUnicode(`## Debate result: ${status}\n${VERIFICATION_NOTICE}\n### Partial answer (debate incomplete)\nSee the partial transcript in the log.\n### Details\nReason: ${reason}\nLog: ${journal.path}`);
     await journal.update({ status, reason, verification: "not_independently_verified", turns, sessions: adapter.sessions, interruptions: adapter.interruptions, finalResult: output, originalResult: originalResultInfo(output) }).catch(() => {});
     return output;
   } finally { execution.signal.removeEventListener("abort", cancel); adapter.release(); }

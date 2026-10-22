@@ -1,6 +1,7 @@
 import type { DebateResult } from "./core/types.ts";
 import type { SessionDetail } from "./adapters/types.ts";
 import type { DebateConfig } from "./config.ts";
+import { escapeInvalidUnicode } from "./core/unicode.ts";
 export const VERIFICATION_NOTICE = "Verification: not independently verified. Model agreement is not proof of correctness; this tool does not execute code or independently check facts.";
 export function renderResult(result: DebateResult, config: DebateConfig, logPath: string, sessions: SessionDetail[], transcript = false): string {
   const name = (debater: "glm" | "deepseek") => config.backend === "openai-compatible"
@@ -30,5 +31,5 @@ export function renderResult(result: DebateResult, config: DebateConfig, logPath
     lines.push("", "### Transcript");
     for (const turn of result.turns) lines.push("", `#### ${turn.id} — ${name(turn.debater)} (${turn.role})${turn.parsed ? "" : " — unvalidated reply"}`, turn.text ?? `No completed reply. ${turn.error ?? ""}`);
   }
-  return lines.join("\n");
+  return escapeInvalidUnicode(lines.join("\n"));
 }

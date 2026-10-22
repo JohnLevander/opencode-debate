@@ -1,6 +1,6 @@
 # Phase reports
 
-Current source status, 2026-10-21: all four phases and the approved follow-ups are implemented. `npm run check` passes TypeScript and 240 tests. The sections below preserve results at each milestone, including historical test counts and approval boundaries. See the final section for maximum-round testing and the timer fix, and [README.md](../README.md) for current setup and behavior.
+Current source status, 2026-10-22: all four phases and the approved follow-ups are implemented. `npm run check` passes TypeScript and 259 tests. The sections below preserve results at each milestone, including historical test counts and approval boundaries. See the final sections for maximum-round testing, the timer fix, and the [ten-risk failure audit](FAILURE_AUDIT.md), and [README.md](../README.md) for current setup and behavior.
 
 ## Phase 1 — deterministic core
 
@@ -149,3 +149,11 @@ Deployed the existing fixes through the installed links, passed all 239 pre-depl
 The iterator answer remained wrong despite eight-round agreement. A child-history audit also found 88 reads denied by the existing guard, including a 63-attempt turn loop bounded by the call timeout. No successful debater tool execution or complete recorded reasoning-block replay was found. The final ABA code and parser passed independent executable checks; the SQL repairs and graph algorithm matched separate reference checks, with a minor graph precision overstatement retained. These findings remain model-quality/runtime limitations; permissions were not relaxed or a new denial-count policy introduced.
 
 The audit reproduced a separate direct-core timer overflow: 2,147,483,648 ms became a 1 ms Node timer and dispatched a callback before immediately expiring. Configuration already rejected it. After all live callers became idle, aligned core validation with the integer timer bounds and avoided arming invalid total timers. The regression failed before the fix and now passes, including the inclusive maximum. The reproduction now reports a protocol error, zero callbacks, and no warnings. TypeScript and all 240 tests pass. Documentation and the public test report accompany this follow-up deployment; raw prompts/reasoning/runtime evidence remain ignored and private.
+
+## Ten-risk failure audit — 2026-10-22
+
+Selected ten likely failures from live-test findings and implementation boundaries, then ran 16 new tests against unchanged baseline `89e322c`: six passed and ten failed. The failing regressions preceded all implementation fixes. Added three more compatibility/isolation checks; all 19 audit tests and all 259 repository tests now pass with TypeScript.
+
+Fixed per-call forbidden-tool denial limits, final-JSON recovery after broken inline drafts, malformed Unicode handling and exact UTF-8 output, permanent-error classification, observer mutation/rejection isolation, failed-initial-journal cleanup, and project config inheritance through `..branch` directories. Forbidden calls now end the debate with a partial protocol error at the third denial; this does not expand tools or file access. Existing collision preservation, large valid Unicode delivery, cancellation races, and orchestration-field/point-ID validation held in the new cases.
+
+The eight-round false-consensus regression intentionally still demonstrates an incorrect agreed answer carrying `not_independently_verified`. General answer accuracy remains unresolved. These tests use adversarial fixtures and a fake native SDK rather than new inference. Reloaded the installed plugin through OpenChamber's OpenCode proxy while sessions were idle; its registry reports active and the hidden debater agent remains registered. No inference was requested. The [full audit](FAILURE_AUDIT.md) records the ten cases, evidence, and limits.

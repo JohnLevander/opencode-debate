@@ -19,8 +19,13 @@ export class DebateLog {
   }
   async initialize() {
     await mkdir(path.dirname(this.path), { recursive: true, mode: 0o700 });
-    const file = await open(this.path, "wx", 0o600); await file.close();
-    await this.update({});
+    const file = await open(this.path, "wx", 0o600);
+    try { await file.close(); await this.update({}); }
+    catch (error) {
+      await file.close().catch(() => {});
+      await unlink(this.path).catch(() => {}); // only the placeholder this initialization created
+      throw error;
+    }
   }
   /** Number of full checkpoint writes performed; each rewrites the whole snapshot atomically. */
   get writeCount(): number { return this.writes; }
