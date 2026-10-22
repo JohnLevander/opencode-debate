@@ -1,8 +1,9 @@
-import { randomInt } from "node:crypto";
+import { createHash, randomInt } from "node:crypto";
 import { scoreContributions } from "./contribution.ts";
 import { parseReply } from "./parse.ts";
-import { DebateError, type DebateEvent, type DebateOptions, type DebateResult, type Debater, type Point, type Reply, type Role, type Turn } from "./types.ts";
-import { openingPrompt, firstCritiquePrompt, critiquePrompt, revisionPrompt, missingPointsPrompt, jsonRepairPrompt, INTERRUPTION_PREFIX } from "../prompts.ts";
+import { DebateError, type DebateEvent, type DebateOptions, type DebateResult, type Debater, type IndependentCheck, type Point, type Reply, type Role, type Turn } from "./types.ts";
+import { checkVerdictSchema } from "./verification.ts";
+import { checkEvidence, openingPrompt, firstCritiquePrompt, critiquePrompt, revisionPrompt, missingPointsPrompt, jsonRepairPrompt, INTERRUPTION_PREFIX } from "../prompts.ts";
 
 export function abortReason(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new DebateError("cancelled", "Debate cancelled");
@@ -62,6 +63,40 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
   const live = () => {
     if (!overall.signal.aborted && now() >= deadline) overall.abort(new DebateError("total_timeout", "Total debate deadline exceeded"));
     if (overall.signal.aborted) throw abortReason(overall.signal);
+  };
+  let latestCheck: IndependentCheck | undefined;
+  const evidence = () => latestCheck ? checkEvidence(latestCheck) : "";
+  const verify = async (turn: Turn) => {
+    if (!opts.verifier) return;
+    live();
+    const controller = new AbortController();
+    const abort = () => controller.abort(overall.signal.reason);
+    overall.signal.addEventListener("abort", abort, { once: true });
+    const record: IndependentCheck = { turnID: turn.id, scope: opts.verifier.scope,
+      answerSha256: createHash("sha256").update(result.answer!).digest("hex"), startedAt: now(), endedAt: now(),
+      status: "inconclusive", summary: "Independent check did not complete", checksRun: 0 };
+    const timer = setTimeout(() => controller.abort(new DebateError("verification", "Independent verifier deadline exceeded")), opts.verifier.timeoutMs);
+    try {
+      const verdict = await abortable(Promise.resolve().then(() => {
+        if (controller.signal.aborted) throw abortReason(controller.signal);
+        return opts.verifier!.check({ question: opts.question, context: opts.context, answer: result.answer! }, controller.signal);
+      }), controller.signal);
+      live();
+      if (now() - record.startedAt >= opts.verifier.timeoutMs) throw new DebateError("verification", "Independent verifier deadline exceeded");
+      const parsed = checkVerdictSchema.safeParse(verdict);
+      if (!parsed.success) throw new DebateError("verification", "Independent verifier returned an invalid verdict");
+      Object.assign(record, parsed.data);
+    } catch (error) {
+      const failure = overall.signal.aborted ? abortReason(overall.signal) : controller.signal.aborted ? abortReason(controller.signal) : error;
+      record.summary = failure instanceof DebateError ? failure.message : "Independent verifier failed";
+      if (failure instanceof DebateError) throw failure;
+      throw new DebateError("verification", record.summary);
+    } finally {
+      clearTimeout(timer); overall.signal.removeEventListener("abort", abort);
+      record.endedAt = now(); latestCheck = record;
+      (result.independentChecks ??= []).push(record);
+      emit({ type: "independent_check", check: record });
+    }
   };
   // Budgets belong to the logical turn, including all JSON/missing-point repairs.
   const budgets = new Map<string, { timedOut: boolean; providerRetries: number }>();
@@ -194,38 +229,43 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
   try {
     if (!opts.question.trim() || !Number.isInteger(opts.maxRounds) || opts.maxRounds < 1 || opts.maxRounds > 8 || !validTimeout(opts.callTimeoutMs) || !validTimeout(opts.totalTimeoutMs)) throw new DebateError("protocol", "Invalid debate options");
     if (!Number.isInteger(minRounds) || minRounds < 1 || minRounds > opts.maxRounds) throw new DebateError("protocol", "min_rounds must be an integer from 1 to max_rounds");
+    if (opts.verifier && (!validTimeout(opts.verifier.timeoutMs) || !opts.verifier.scope.trim() || opts.verifier.scope.length > 1000 || typeof opts.verifier.check !== "function")) throw new DebateError("protocol", "Invalid independent verifier options");
     live(); emit({ type: "start", assignment: result.assignment });
     let proposal = await takeTurn("P0", 0, "proposer", openingPrompt(opts.question, opts.context));
     result.answer = proposal.parsed!.answer;
+    await verify(proposal);
     let previousOpen: string | undefined;
     for (let round = 1; round <= opts.maxRounds; round++) {
       result.rounds = round;
-      const critique = await takeTurn(`C${round}`, round, "challenger", round === 1 ? firstCritiquePrompt(opts.question, opts.context, JSON.stringify(proposal.parsed!)) : critiquePrompt(JSON.stringify(proposal.parsed!), snapshot(points)));
+      const critique = await takeTurn(`C${round}`, round, "challenger", (round === 1 ? firstCritiquePrompt(opts.question, opts.context, JSON.stringify(proposal.parsed!)) : critiquePrompt(JSON.stringify(proposal.parsed!), snapshot(points))) + evidence());
       applyChallenger(critique.parsed!);
       result.pointHistory.push({ turnID: critique.id, points: snapshot(points) });
       const open = [...points.values()].filter((p) => p.status === "open").map((p) => p.id).sort();
       const key = JSON.stringify(open);
       const minimumMet = round >= minRounds;
-      const decision = minimumMet && critique.parsed!.agrees_with_current_answer && !open.length ? "converged"
-        : round >= Math.max(2, minRounds) && previousOpen === key ? "stalemate"
+      const checksPassed = !opts.verifier || latestCheck?.status === "passed";
+      const decision = minimumMet && checksPassed && critique.parsed!.agrees_with_current_answer && !open.length ? "converged"
+        : checksPassed && round >= Math.max(2, minRounds) && previousOpen === key ? "stalemate"
         : round === opts.maxRounds ? "max_rounds" : "continue";
       const check: DebateResult["stopChecks"][number] = { turnID: critique.id, round, minimumMet, agrees: critique.parsed!.agrees_with_current_answer,
-        openIDs: open, previousOpenIDs: previousOpen === undefined ? null : JSON.parse(previousOpen) as string[], decision };
+        openIDs: open, previousOpenIDs: previousOpen === undefined ? null : JSON.parse(previousOpen) as string[], decision,
+        ...(latestCheck ? { independentCheck: latestCheck.status } : {}) };
       result.stopChecks.push(check); emit({ type: "stop_check", check: structuredClone(check) });
       if (decision !== "continue") {
         result.status = decision;
         result.reason = decision === "converged" ? "Challenger endorses the current answer with no open points"
-          : decision === "stalemate" ? "Open point IDs are unchanged across consecutive Challenger turns" : "Maximum Challenger rounds reached";
+          : decision === "stalemate" ? "Open point IDs are unchanged across consecutive Challenger turns" : `Maximum Challenger rounds reached${checksPassed ? "" : "; independent checks did not pass"}`;
         break;
       }
       previousOpen = key;
-      proposal = await takeTurn(`P${round}`, round, "proposer", revisionPrompt(JSON.stringify(critique.parsed!), snapshot(points)));
+      proposal = await takeTurn(`P${round}`, round, "proposer", revisionPrompt(JSON.stringify(critique.parsed!), snapshot(points)) + evidence());
       result.answer = proposal.parsed!.answer;
       for (const p of proposal.parsed!.points) {
         const old = points.get(p.id);
         if (old && (p.status === "conceded" || p.status === "defended")) { old.proposerStatus = p.status; old.proposer = p.note; }
       }
       result.pointHistory.push({ turnID: proposal.id, points: snapshot(points) });
+      await verify(proposal);
     }
   } catch (error) {
     result.status = error instanceof DebateError && error.code === "cancelled" ? "cancelled" : "error";

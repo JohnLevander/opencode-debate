@@ -4,7 +4,7 @@ An OpenCode **2.0.32** plugin for debates between GLM 5.3 Flash Free and DeepSee
 
 **Current status:** The free OpenCode backend has a tested, opt-in **restricted-read compatibility mode**. The installed tool completed the IEEE 754 case and three two-round coding debates through OpenChamber. The coding tests also exposed an incorrect promise-timing claim that both models accepted: agreement is not independent verification. Results now carry that distinction and an original Markdown attachment for the exact output/transcript. The automated checks pass. Strict no-tools mode remains the default and still encounters the reported `FreeTierError`. No paid inference has been performed; the selectable OpenAI-compatible fallback remains optional. See [compatibility setup](#free-only-compatibility-mode), the [integration report](docs/INTEGRATION.md), [phase reports](docs/PHASES.md), [API findings](docs/FINDINGS.md), and [specification](docs/SPEC.md).
 
-The [five maximum-round logic tests](docs/LOGIC_STRESS.md) completed eight rounds each through OpenChamber. They recovered four timeouts and two role repairs, preserved exact transcripts, and exposed another wrong answer surviving model agreement plus a loop of denied read attempts. The later [ten-risk failure audit](docs/FAILURE_AUDIT.md) reproduced ten failing regression tests before fixing seven implementation areas, including that denial loop. TypeScript and all **259 tests pass**. These tests establish exercised behavior, not guaranteed answer accuracy.
+The [five maximum-round logic tests](docs/LOGIC_STRESS.md) completed eight rounds each through OpenChamber. They recovered four timeouts and two role repairs, preserved exact transcripts, and exposed another wrong answer surviving model agreement plus a loop of denied read attempts. The later [ten-risk failure audit](docs/FAILURE_AUDIT.md) reproduced ten failing regression tests before fixing seven implementation areas, including that denial loop. An optional [independent checker](docs/VERIFICATION.md) now blocks agreement when a proposed answer fails executable checks. TypeScript and all **276 tests pass**. These tests establish exercised behavior, not guaranteed answer accuracy.
 
 ## Install and uninstall
 
@@ -59,6 +59,8 @@ Normal completion always ends on the Challenger's review, once the requested min
 
 A converged answer is labeled **Agreed answer (not independently verified)**. Every engine result has `verification: "not_independently_verified"`; confidence and agreement never upgrade it. The debaters cannot execute code or independently inspect facts. Prompts ask them to reconstruct disputed mechanisms, test counterexamples, distinguish observed execution from predictions, and retain uncertainty when evidence is insufficient.
 
+For claims with executable ground truth, configure an [independent verifier](docs/VERIFICATION.md). It runs outside the debaters after each proposal, supplies evidence to both sides, and blocks convergence/stalemate until the current answer passes. The result records the exact answer hash, check count, scope, and evidence; a scoped pass does not prove the entire explanation. The included Node prediction checker executes a fixed trusted fixture and compares the answer's predicted JSON output, without executing model-generated source. No checker is enabled by default.
+
 The registered tool returns both text and an identical `debate-result-<hash>.md` attachment, including the full raw turn replies when `include_transcript` is true. OpenCode Code Mode collects the attachment separately from the caller's returned text. Use that file or the private JSON journal as the authoritative result: the calling model can still reformat or omit details in its chat reply. The attachment's name, full SHA-256, and UTF-8 byte count are recorded as `originalResult` in tool metadata and the final journal. A context hook replaces only matching original attachments with a text reference for subsequent model requests, keeping unsupported Markdown media out of provider input while preserving the stored/UI file.
 
 Malformed Unicode in an answer or point triggers the bounded reply-repair path. Lone UTF-16 surrogates in rejected raw text are shown as visible `\uXXXX` escapes in Markdown; the JSON journal retains their original code units. This avoids silent UTF-8 replacement and keeps the canonical Markdown, attachment, hash, and byte count consistent. Valid Unicode is unchanged.
@@ -84,6 +86,7 @@ Start from `debate.config.example.json`. Copying a configuration outside the rep
 | `callTimeoutMs` | 300000 (5 minutes) |
 | `totalTimeoutMs` | 1800000 (30 minutes) |
 | `logDir` | `~/.local/share/opencode-debate/debates` (`XDG_DATA_HOME` is honored) |
+| `verifier` | omitted; optional trusted `command` array (absolute executable), `scope`, and `timeoutMs` (default 10000); see [checker contract](docs/VERIFICATION.md) |
 | `openaiCompatible.baseURL` | `https://openrouter.ai/api/v1` (API base; `/chat/completions` is appended) |
 | `openaiCompatible.apiKeyEnv` | `OPENROUTER_API_KEY` (environment variable name, never the key itself) |
 | `openaiCompatible.models.glm` | `z-ai/glm-5.3-flash` |

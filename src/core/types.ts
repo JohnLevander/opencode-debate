@@ -24,6 +24,16 @@ export interface ContributionScore {
 export interface StopCheck {
   turnID: string; round: number; minimumMet: boolean; agrees: boolean; openIDs: string[]; previousOpenIDs: string[] | null;
   decision: "continue" | "converged" | "stalemate" | "max_rounds";
+  independentCheck?: CheckVerdict["status"];
+}
+export interface CheckInput { question: string; context?: string; answer: string }
+export interface CheckVerdict { status: "passed" | "failed" | "inconclusive"; summary: string; checksRun: number }
+export interface IndependentCheck extends CheckVerdict {
+  turnID: string; scope: string; answerSha256: string; startedAt: number; endedAt: number;
+}
+export interface Verifier {
+  scope: string; timeoutMs: number;
+  check: (input: CheckInput, signal: AbortSignal) => Promise<CheckVerdict>;
 }
 export interface DebateResult {
   verification: "not_independently_verified";
@@ -32,6 +42,7 @@ export interface DebateResult {
   limits: { minRounds: number; maxRounds: number }; stopChecks: StopCheck[];
   status: DebateStatus; reason: string; rounds: number; answer: string | null;
   failure?: { code: DebateErrorCode; turnID?: string; debater?: Debater; attempts: number; validationFailures: number };
+  independentChecks?: IndependentCheck[];
   points: Point[]; pointHistory: { turnID: string; points: Point[] }[];
   turns: Turn[]; startedAt: number; endedAt: number;
 }
@@ -41,15 +52,17 @@ export type DebateEvent =
   | { type: "retry"; turnID: string; reason: string; delayMs: number }
   | { type: "validation_failure"; turnID: string; at: number; stage: "reply" | "missing_points"; reason: string; repair: boolean }
   | { type: "stop_check"; check: StopCheck }
+  | { type: "independent_check"; check: IndependentCheck }
   | { type: "end"; result: DebateResult };
 export interface DebateOptions {
   question: string; context?: string; maxRounds: number; minRounds?: number; first: Debater | "random";
   callTimeoutMs: number; totalTimeoutMs: number;
   callModel: (debater: Debater, message: string, signal: AbortSignal) => Promise<{ text: string; reasoning?: string }>;
   onTurn?: (turn: Turn) => void; onEvent?: (event: DebateEvent) => void;
+  verifier?: Verifier;
   signal?: AbortSignal; random?: () => number; now?: () => number;
 }
-export type DebateErrorCode = "call_timeout" | "total_timeout" | "cancelled" | "rate_limit" | "provider_unavailable" | "protocol" | "transport";
+export type DebateErrorCode = "call_timeout" | "total_timeout" | "cancelled" | "rate_limit" | "provider_unavailable" | "protocol" | "transport" | "verification";
 export class DebateError extends Error {
   constructor(public code: DebateErrorCode, message: string, public retryAfterMs?: number) {
     super(message); this.name = "DebateError";

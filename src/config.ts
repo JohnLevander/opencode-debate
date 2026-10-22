@@ -11,6 +11,12 @@ export const configSchema = z.object({
   callTimeoutMs: z.number().int().min(1).max(2_147_483_647),
   totalTimeoutMs: z.number().int().min(1).max(2_147_483_647),
   logDir: z.string().min(1),
+  verifier: z.object({
+    command: z.array(z.string().min(1).max(10_000).refine(value => !value.includes("\0"))).min(1).max(32)
+      .refine(value => path.isAbsolute(value[0]), "Verifier executable must be an absolute path"),
+    scope: z.string().trim().min(1).max(1000),
+    timeoutMs: z.number().int().min(1).max(2_147_483_647).default(10_000),
+  }).strict().optional(),
   openaiCompatible: z.object({
     baseURL: z.url().refine(value => {
       try {

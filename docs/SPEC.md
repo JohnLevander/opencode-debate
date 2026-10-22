@@ -31,6 +31,7 @@ function runDebate(opts: {
   ) => Promise<{ text: string; reasoning?: string }>;
   onTurn?: (turn: Turn) => void;   // completed/rejected turn logging
   onEvent?: (event: DebateEvent) => void; // progress, retries, validation, stop checks
+  verifier?: Verifier;             // trusted scoped check with its own deadline
   signal?: AbortSignal;            // overall cancellation
   random?: () => number;           // injectable for seeded tests; default crypto-backed
   now?: () => number;              // injectable clock for timeout tests
@@ -94,6 +95,7 @@ Stop conditions (checked after each C turn):
 - cancelled: I cancelled the tool call.
 - error: unrecoverable failure, including the total deadline (record the reason).
 Returned answer = P's latest "answer" (P0's answer if the debate converged at C1). Convergence measures agreement, not correctness. Every engine result has `verification: "not_independently_verified"`; neither confidence nor convergence changes it. The prompts require independent reconstruction of disputed mechanisms and explicit uncertainty without claiming code execution or source inspection that did not occur. These instructions mitigate model errors; they cannot guarantee factual accuracy.
+Optional independent verification: a locally configured trusted command checks each validated Proposer answer before its Challenger review. Failed or inconclusive checks block convergence and early stalemate until the round budget expires or a revised answer passes. Check evidence is relayed to both sides and checkpointed with the exact answer hash and scope. A previous pass cannot verify a later revision. Checker execution/protocol/deadline failures stop with a partial `verification` error; cancellation/total deadlines also abort checking. Whole-answer verification remains unverified even when finite scoped checks pass. See the [checker contract](VERIFICATION.md) for configuration, process limits, trust boundaries, and the fixed-source Node prediction checker.
 - Call timeout: when the per-call deadline fires, retry once in the same session, sending the original message prefixed with "Your previous reply was interrupted before it finished. Reply again in full." A second failure ends the debate with status error and returns everything gathered so far.
 - Invalid JSON/protocol: re-prompt once with the role, validation error, canonical state, and required format. A second invalid reply ends the turn with a protocol failure. One separate missing-point repair is allowed.
 - Provider retries: rate limits and outages share at most two retries per logical turn. These budgets, and the single timeout retry, remain shared across JSON/protocol and missing-point repairs, allowing at most six dispatched attempts per turn. Backoff starts at one second and doubles; cancellation and the total deadline bound waiting. No retry automatically switches the model or backend.
@@ -121,7 +123,7 @@ Lone UTF-16 surrogates in unvalidated text/diagnostics are rendered as visible `
 ```
 ## Debate result: <converged | stalemate | max_rounds | cancelled | error>
 Proposer: <model> | Challenger: <model> | Rounds: <n>
-Verification: not independently verified. Model agreement is not proof of correctness; this tool does not execute code or independently check facts.
+Verification: not independently verified. Model agreement is not proof of correctness; only explicitly reported independent checks provide scoped evidence.
 ### Agreed answer (not independently verified)
 <latest answer; heading is partial/incomplete on error/cancellation, current on non-convergence>
 ### Unresolved points        (omit only when converged with none)

@@ -1,6 +1,6 @@
 # Phase reports
 
-Current source status, 2026-10-22: all four phases and the approved follow-ups are implemented. `npm run check` passes TypeScript and 259 tests. The sections below preserve results at each milestone, including historical test counts and approval boundaries. See the final sections for maximum-round testing, the timer fix, and the [ten-risk failure audit](FAILURE_AUDIT.md), and [README.md](../README.md) for current setup and behavior.
+Current source status, 2026-10-22: all four phases and the approved follow-ups are implemented. `npm run check` passes TypeScript and 276 tests. The sections below preserve results at each milestone, including historical test counts and approval boundaries. See the final sections for maximum-round testing, the timer fix, the [ten-risk failure audit](FAILURE_AUDIT.md), and [independent verification](VERIFICATION.md), and [README.md](../README.md) for current setup and behavior.
 
 ## Phase 1 — deterministic core
 

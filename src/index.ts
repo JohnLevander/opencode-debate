@@ -2,7 +2,7 @@ import { Agent, Plugin } from "@opencode/plugin";
 import { z } from "zod";
 import { defaults, loadConfig, type DebateConfig } from "./config.ts";
 import { runDebate } from "./core/debate.ts";
-import type { Turn } from "./core/types.ts";
+import type { IndependentCheck, Turn } from "./core/types.ts";
 import { DEBATER_SYSTEM, TOOL_DESCRIPTION } from "./prompts.ts";
 import { OpenCodeAdapter, AGENT_ID, MODEL_NAMES, NO_TOOLS } from "./adapters/opencode.ts";
 import { retryAfterMs, TRANSIENT_STATUSES } from "./adapters/http.ts";
@@ -13,6 +13,7 @@ import { registerToolIsolation, type RestrictedReads } from "./restricted-read.t
 import { renderResult, VERIFICATION_NOTICE } from "./render.ts";
 import { originalResultInfo, resultWithOriginal, withoutOriginalAttachments } from "./result.ts";
 import { escapeInvalidUnicode } from "./core/unicode.ts";
+import { commandVerifier } from "./verifier.ts";
 
 export const debateArgs = z.object({
   question: z.string().trim().min(1).max(100_000), context: z.string().max(300_000).optional(),
@@ -42,6 +43,7 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
     ? new OpenCodeAdapter(ctx, config, execution.sessionID, journal.slug, owned, retryHints, restrictedReads)
     : new OpenAICompatibleAdapter(config);
   const validationFailures: object[] = []; const retryEvents: object[] = []; const stopChecks: object[] = [];
+  const checks: IndependentCheck[] = [];
   const turns: Turn[] = []; const pendingWrites: Promise<unknown>[] = [];
   const progress = (message: string) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -60,6 +62,7 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
     const result = await runDebate({
       question: args.question, context: args.context, maxRounds: args.max_rounds ?? config.defaultMaxRounds, minRounds: args.min_rounds,
       first: args.first, callTimeoutMs: config.callTimeoutMs, totalTimeoutMs: config.totalTimeoutMs, signal: execution.signal,
+      verifier: config.verifier ? commandVerifier(config.verifier, ctx.location.directory) : undefined,
       callModel: async (...params) => {
         if (configurationError) throw configurationError;
         if (execution.agent === AGENT_ID) throw new Error("A debater cannot invoke the debate tool");
@@ -75,6 +78,9 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
         } else if (event.type === "validation_failure") {
           validationFailures.push(event); save({ validationFailures });
           progress(`${event.turnID}: invalid reply (${event.reason}); ${event.repair ? "requesting one repair" : "stopping after failed repair"}.`);
+        } else if (event.type === "independent_check") {
+          checks.push(event.check); save({ independentChecks: checks });
+          progress(`${event.check.turnID}: independent checks ${event.check.status} (${event.check.checksRun} checks).`);
         } else if (event.type === "stop_check") { stopChecks.push(event.check); save({ stopChecks });
         } else if (event.type === "retry") {
           retryEvents.push({ ...event, at: Date.now() }); save({ retryEvents });
@@ -95,7 +101,7 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
     const reason = error instanceof Error ? error.message : String(error);
     const status = execution.signal.aborted ? "cancelled" : "error";
     const output = escapeInvalidUnicode(`## Debate result: ${status}\n${VERIFICATION_NOTICE}\n### Partial answer (debate incomplete)\nSee the partial transcript in the log.\n### Details\nReason: ${reason}\nLog: ${journal.path}`);
-    await journal.update({ status, reason, verification: "not_independently_verified", turns, sessions: adapter.sessions, interruptions: adapter.interruptions, finalResult: output, originalResult: originalResultInfo(output) }).catch(() => {});
+    await journal.update({ status, reason, verification: "not_independently_verified", independentChecks: checks, turns, sessions: adapter.sessions, interruptions: adapter.interruptions, finalResult: output, originalResult: originalResultInfo(output) }).catch(() => {});
     return output;
   } finally { execution.signal.removeEventListener("abort", cancel); adapter.release(); }
 }

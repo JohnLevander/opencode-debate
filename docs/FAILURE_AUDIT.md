@@ -2,6 +2,8 @@
 
 Tested October 22, 2026 (America/New_York), against baseline `89e322c`. The risks were selected from the earlier live debates and the public core, parser, transport, callback, configuration, and journal boundaries. This audit uses scripted adversarial replies, mocked native hooks/SDK operations, local output encoding, and filesystem fault injection. It does not use new model inference or establish general answer accuracy.
 
+Subsequent follow-up: optional [independent checks](VERIFICATION.md) now prevent failed or inconclusive externally checked answers from stopping by agreement. This historical audit still describes baseline agreement-only behavior and its 259-test milestone; general answer accuracy is not guaranteed.
+
 The first **16 tests ran against unchanged production code: 6 passed and 10 failed**. The failing tests were added before implementation fixes. Three additional tests check parser compatibility, per-call denial isolation, and stalled/mutating observers. All **19 audit tests pass**, and `npm run check` passes TypeScript and **259 total tests**, with no skips.
 
 ## Ranked risks and results
