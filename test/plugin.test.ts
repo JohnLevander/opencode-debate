@@ -9,13 +9,14 @@ import { DebateLog } from "../src/log.ts";
 import { fakeClient } from "./helpers/fake.ts";
 import { tempRoot } from "./helpers/temp.ts";
 import type { Plugin } from "@opencode/plugin";
+import { createHash } from "node:crypto";
 
 async function directory() { return tempRoot("test-"); }
 test("v2 tool registration preserves exact description and hides/isolates debater", async () => {
   const hooks: Record<string, Function> = {}; let agent: any = {}; let tool: any;
   const ctx = {
     agent: { list: async () => ({ data: [] }), transform: async (fn: Function) => fn({ update: (_id: string, update: Function) => update(agent) }) },
-    session: { hook: async (name: string, fn: Function) => { hooks[name] = fn; } },
+    session: { hook: async (name: string, fn: Function) => { const previous = hooks[name]; hooks[name] = previous ? async (...args: unknown[]) => { await previous(...args); await fn(...args); } : fn; } },
     tool: { hook: async (name: string, fn: Function) => { hooks[`tool.${name}`] = fn; }, transform: async (fn: Function) => fn({ add: (value: any) => { tool = value; } }) },
   } as unknown as Plugin.Context;
   await plugin.setup(ctx);
@@ -233,13 +234,12 @@ for (const [name, poison] of [["__proto__", '{"__proto__": {"defaultMaxRounds": 
   });
 }
 
-function hookHarness(root: string) {
-  const fake = fakeClient();
+function hookHarness(root: string, fake = fakeClient()) {
   const hooks: Record<string, Function> = {}; let tool: any;
   const ctx = {
     ...fake.client,
     agent: { list: async () => ({ data: [] }), transform: async (fn: Function) => fn({ update: (_id: string, update: Function) => update({}) }) },
-    session: { ...fake.raw.session, hook: async (name: string, fn: Function) => { hooks[name] = fn; } },
+    session: { ...fake.raw.session, hook: async (name: string, fn: Function) => { const previous = hooks[name]; hooks[name] = previous ? async (...args: unknown[]) => { await previous(...args); await fn(...args); } : fn; } },
     tool: { hook: async (name: string, fn: Function) => { hooks[`tool.${name}`] = fn; }, transform: async (fn: Function) => fn({ add: (v: any) => { tool = v; } }) },
     location: { directory: root, project: { directory: root } }, app: { version: "2.0.32" },
   } as unknown as Plugin.Context;
@@ -309,6 +309,9 @@ test("a journal-init failure creates no log file and dispatches nothing", async 
   assert.deepEqual(await readdir(root), ["blocker"]);
   assert.equal(fake.created.length, 0); assert.equal(fake.prompts.length, 0);
   assert.match(output, /No answer was gathered/);
+  assert.match(output, /Partial answer \(debate incomplete\)/);
+  assert.match(output, /Verification: not independently verified/);
+  assert.ok(!output.includes("### Final answer"));
 });
 
 test("oversized questions are rejected before the tool runs", async () => {
@@ -394,4 +397,62 @@ test("a progress callback returning a non-thenable object cannot break the resul
 test("a progress callback returning a plain string cannot break the result", async () => withLogDir(async root => {
   const output = await executeDebate(ctxOf(debating(), root), { question: "test", first: "glm" }, executionOf("build", (() => "done") as unknown as () => Promise<void>), shared());
   assert.match(output, /Debate result: converged/);
+}));
+
+test("the registered tool attaches the complete original transcript independently of caller text", async () => withLogDir(async root => {
+  const fake = debating(); const original = fake.raw.session.prompt;
+  fake.raw.session.prompt = async input => {
+    const admitted = await original(input);
+    const content = fake.messages.get(input.sessionID)!.at(-1).content;
+    content[0].text = `${"Original 汉😀 prose. ".repeat(1000)}\n\`\`\`json\n${content[0].text}\n\`\`\``;
+    return admitted;
+  };
+  const harness = hookHarness(root, fake); await plugin.setup(harness.ctx);
+  const result = await harness.tool().execute({ question: "q", first: "glm", include_transcript: true }, executionOf("build"));
+  const text = result.content.find((part: any) => part.type === "text").text;
+  const file = result.content.find((part: any) => part.type === "file");
+  assert.equal(file.mime, "text/markdown"); assert.match(file.uri, /^data:text\/markdown;base64,/);
+  const bytes = Buffer.from(file.uri.split(",")[1], "base64");
+  assert.equal(bytes.toString("utf8"), text);
+  const log = JSON.parse(await readFile(path.join(root, (await readdir(root))[0]), "utf8"));
+  assert.equal(text, log.finalResult); assert.ok(text.length > 30_000);
+  assert.match(text, /### Transcript/); assert.ok(text.includes("汉😀"));
+  for (const turn of log.turns) assert.ok(text.includes(turn.text));
+  assert.equal(result.metadata.originalResult.sha256, createHash("sha256").update(bytes).digest("hex"));
+  assert.equal(result.metadata.originalResult.bytes, bytes.length);
+  assert.equal(result.metadata.originalResult.name, file.name);
+  assert.deepEqual(log.originalResult, result.metadata.originalResult);
+  assert.equal(log.verification, "not_independently_verified");
+}));
+
+test("an incomplete tool result also has an intact original attachment and unverified status", async () => withLogDir(async root => {
+  const fake = fakeClient(); fake.raw.model.list = async () => ({ data: [] });
+  const harness = hookHarness(root, fake); await plugin.setup(harness.ctx);
+  const result = await harness.tool().execute({ question: "q", first: "glm", include_transcript: true }, executionOf("build"));
+  const text = result.content.find((part: any) => part.type === "text").text;
+  const file = result.content.find((part: any) => part.type === "file");
+  assert.equal(Buffer.from(file.uri.split(",")[1], "base64").toString("utf8"), text);
+  assert.match(text, /Partial answer \(debate incomplete\)/);
+  assert.match(text, /unvalidated reply/);
+  assert.equal(result.metadata.verification, "not_independently_verified");
+}));
+
+test("a final journal failure returns an incomplete original and checkpoints its matching fingerprint when possible", async t => withLogDir(async root => {
+  const update = DebateLog.prototype.update; let failed = false;
+  t.mock.method(DebateLog.prototype, "update", function (this: DebateLog, patch: Record<string, unknown>) {
+    if (!failed && patch.finalResult) { failed = true; return Promise.reject(new Error("fixture final checkpoint failure")); }
+    return update.call(this, patch);
+  });
+  const harness = hookHarness(root, debating()); await plugin.setup(harness.ctx);
+  const result = await harness.tool().execute({ question: "q", first: "glm" }, executionOf("build"));
+  const text = result.content.find((part: any) => part.type === "text").text;
+  const file = result.content.find((part: any) => part.type === "file");
+  assert.ok(failed); assert.match(text, /Debate result: error/);
+  assert.match(text, /Partial answer \(debate incomplete\)/);
+  assert.match(text, /Verification: not independently verified/);
+  assert.ok(!text.includes("### Final answer"));
+  assert.equal(Buffer.from(file.uri.split(",")[1], "base64").toString("utf8"), text);
+  const log = JSON.parse(await readFile(path.join(root, (await readdir(root))[0]), "utf8"));
+  assert.equal(log.finalResult, text); assert.equal(log.verification, "not_independently_verified");
+  assert.deepEqual(log.originalResult, result.metadata.originalResult);
 }));

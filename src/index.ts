@@ -10,7 +10,8 @@ import { OpenAICompatibleAdapter } from "./adapters/openai-compatible.ts";
 import type { DebateAdapter } from "./adapters/types.ts";
 import { DebateLog } from "./log.ts";
 import { registerToolIsolation, type RestrictedReads } from "./restricted-read.ts";
-import { renderResult } from "./render.ts";
+import { renderResult, VERIFICATION_NOTICE } from "./render.ts";
+import { originalResultInfo, resultWithOriginal, withoutOriginalAttachments } from "./result.ts";
 
 export const debateArgs = z.object({
   question: z.string().trim().min(1).max(100_000), context: z.string().max(300_000).optional(),
@@ -35,7 +36,7 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
     ...(configurationError === undefined ? { config } : { configError: configErrorText }), args,
     opencodeVersion: ctx.app.version, parentSessionID: execution.sessionID, limits: { minRounds: args.min_rounds ?? 1, maxRounds: args.max_rounds ?? config.defaultMaxRounds }, validationFailures: [], retryEvents: [], stopChecks: [], turns: [], pointHistory: [], sessions: [] });
   try { await journal.initialize(); }
-  catch (error) { return `## Debate result: error\n### Final answer\nNo answer was gathered.\n### Details\nCannot create the required debate log at ${journal.path}: ${error instanceof Error ? error.message : String(error)}`; }
+  catch (error) { return `## Debate result: error\n${VERIFICATION_NOTICE}\n### Partial answer (debate incomplete)\nNo answer was gathered.\n### Details\nCannot create the required debate log at ${journal.path}: ${error instanceof Error ? error.message : String(error)}`; }
   const adapter: DebateAdapter = config.backend === "opencode"
     ? new OpenCodeAdapter(ctx, config, execution.sessionID, journal.slug, owned, retryHints, restrictedReads)
     : new OpenAICompatibleAdapter(config);
@@ -85,14 +86,16 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
     await Promise.allSettled(pendingWrites);
     const output = renderResult(result, config, journal.path, adapter.sessions, args.include_transcript);
     await journal.update({ ...result, ...(configurationError === undefined ? { config } : { config: undefined, configError: configErrorText }),
-      args, sessions: adapter.sessions, diagnostics: adapter.diagnostics, interruptions: adapter.interruptions, finalResult: output });
+      args, sessions: adapter.sessions, diagnostics: adapter.diagnostics, interruptions: adapter.interruptions, finalResult: output, originalResult: originalResultInfo(output) });
     progress(`Debate ended: ${result.status}. ${result.rounds} Challenger round(s). Log: ${journal.path}`);
     return output;
   } catch (error) {
     await adapter.cancelAll();
     const reason = error instanceof Error ? error.message : String(error);
-    await journal.update({ status: execution.signal.aborted ? "cancelled" : "error", reason, turns, sessions: adapter.sessions, interruptions: adapter.interruptions }).catch(() => {});
-    return `## Debate result: ${execution.signal.aborted ? "cancelled" : "error"}\n### Final answer\nSee the partial transcript in the log.\n### Details\nReason: ${reason}\nLog: ${journal.path}`;
+    const status = execution.signal.aborted ? "cancelled" : "error";
+    const output = `## Debate result: ${status}\n${VERIFICATION_NOTICE}\n### Partial answer (debate incomplete)\nSee the partial transcript in the log.\n### Details\nReason: ${reason}\nLog: ${journal.path}`;
+    await journal.update({ status, reason, verification: "not_independently_verified", turns, sessions: adapter.sessions, interruptions: adapter.interruptions, finalResult: output, originalResult: originalResultInfo(output) }).catch(() => {});
+    return output;
   } finally { execution.signal.removeEventListener("abort", cancel); adapter.release(); }
 }
 
@@ -110,6 +113,9 @@ export default Plugin.define({
       agent.permissions = [...NO_TOOLS]; delete agent.steps;
     }));
     await registerToolIsolation(ctx, owned, restrictedReads);
+    await ctx.session.hook("context", event => {
+      event.messages = withoutOriginalAttachments(event.messages ?? []);
+    });
     await ctx.session.hook("http.response", event => {
       if (event.agent !== AGENT_ID && !owned.has(event.sessionID)) return;
       if ([...TRANSIENT_STATUSES, 429].includes(event.response.status)) { // 429 hints cover genuine rate limits too
@@ -123,7 +129,7 @@ export default Plugin.define({
     });
     await ctx.tool.transform(editor => editor.add({
       name: "debate", description: TOOL_DESCRIPTION, input: debateArgs, options: { codemode: true, pinned: true },
-      async execute(input, context) { return { content: await executeDebate(ctx, input, context, { owned, retryHints, restrictedReads }) }; },
+      async execute(input, context) { return resultWithOriginal(await executeDebate(ctx, input, context, { owned, retryHints, restrictedReads })); },
     }));
   },
 });

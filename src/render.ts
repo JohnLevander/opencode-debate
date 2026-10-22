@@ -1,13 +1,16 @@
 import type { DebateResult } from "./core/types.ts";
 import type { SessionDetail } from "./adapters/types.ts";
 import type { DebateConfig } from "./config.ts";
+export const VERIFICATION_NOTICE = "Verification: not independently verified. Model agreement is not proof of correctness; this tool does not execute code or independently check facts.";
 export function renderResult(result: DebateResult, config: DebateConfig, logPath: string, sessions: SessionDetail[], transcript = false): string {
   const name = (debater: "glm" | "deepseek") => config.backend === "openai-compatible"
     ? config.openaiCompatible.models[debater]
     : `${config.models[debater].providerID}/${config.models[debater].modelID}`;
   const incomplete = result.status === "error" || result.status === "cancelled";
-  const heading = incomplete ? "Partial answer (debate incomplete)" : result.status === "converged" ? "Final answer" : "Current answer (not converged)";
-  const lines = [`## Debate result: ${result.status}`, `Proposer: ${name(result.assignment.proposer)} | Challenger: ${name(result.assignment.challenger)} | Rounds: ${result.rounds}`, "", `### ${heading}`, result.answer ?? "No valid answer was gathered before the debate stopped."];
+  const heading = incomplete ? "Partial answer (debate incomplete)" : result.status === "converged" ? "Agreed answer (not independently verified)" : "Current answer (not converged)";
+  const lines = [`## Debate result: ${result.status}`, `Proposer: ${name(result.assignment.proposer)} | Challenger: ${name(result.assignment.challenger)} | Rounds: ${result.rounds}`,
+    VERIFICATION_NOTICE,
+    "", `### ${heading}`, result.answer ?? "No valid answer was gathered before the debate stopped."];
   if (incomplete) {
     const reviews = result.turns.filter(t => t.role === "challenger" && t.parsed).length;
     lines.push("", `Validated challenger reviews: ${reviews}. ${reviews === 0 ? (result.answer ? "The proposer answer has not passed a validated challenger review." : "No challenger review was validated.") : "The debate stopped before reaching a completed result."}`);

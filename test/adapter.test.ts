@@ -5,6 +5,11 @@ import { providerFailureCode } from "../src/adapters/http.ts";
 import { defaults } from "../src/config.ts";
 import { DebateError } from "../src/core/types.ts";
 import { runDebate } from "../src/core/debate.ts";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { ClientError } from "@opencode/client";
+import { RestrictedRead } from "../src/restricted-read.ts";
+import { tempRoot } from "./helpers/temp.ts";
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 import { fakeClient } from "./helpers/fake.ts";
@@ -388,4 +393,62 @@ test("string rate-limit guidance without a type classifies as rate_limit", () =>
 test("a padded zero Retry-After still yields a usable floor hint", async () => {
   const { retryAfterMs } = await import("../src/adapters/http.ts");
   assert.equal(retryAfterMs(" 0 "), 0);
+});
+
+test("a real compatibility guard failure preserves its cause and dispatches only once", async t => {
+  const root = await tempRoot("guard-error-");
+  await mkdir(root, { recursive: true });
+  const file = path.join(root, "empty.txt");
+  await writeFile(file, ""); await writeFile(path.join(root, "AGENTS.md"), "Fixture instruction file");
+  const create = RestrictedRead.create; let checks = 0;
+  t.mock.method(RestrictedRead, "create", async (directory: string) => { checks++; return create.call(RestrictedRead, directory, file); });
+  const config = defaults(); config.readCompatibility = true;
+  const fake = fakeClient();
+  const adapter = new OpenCodeAdapter(fake.client, config, "parent", "guard", new Set());
+  adapter.setAssignment({ proposer: "glm", challenger: "deepseek" });
+  t.after(() => adapter.release());
+  const retries: unknown[] = [];
+  const result = await runDebate({ question: "q", first: "glm", maxRounds: 1, callTimeoutMs: 1000, totalTimeoutMs: 5000,
+    callModel: adapter.callModel, onEvent: event => { if (event.type === "retry") retries.push(event); } });
+  assert.equal(result.status, "error"); assert.equal(result.failure?.code, "transport");
+  assert.match(result.reason, /Restricted-read compatibility check failed:.*nearby AGENTS\.md/);
+  assert.equal(checks, 1); assert.equal(result.turns[0].attempts.length, 1);
+  assert.deepEqual(retries, []); assert.equal(fake.created.length, 0);
+});
+
+for (const tag of ["UnauthorizedError", "InvalidRequestError", "SessionNotFoundError"]) {
+  test(`declared SDK ${tag} is permanent and does not expose its body`, async () => {
+    const fake = fakeClient();
+    fake.raw.model.list = async () => { throw { _tag: tag, message: "secret-body-should-not-be-logged" }; };
+    const adapter = new OpenCodeAdapter(fake.client, defaults(), "parent", "request", new Set());
+    adapter.setAssignment({ proposer: "glm", challenger: "deepseek" });
+    const result = await runDebate({ question: "q", first: "glm", maxRounds: 1, callTimeoutMs: 1000, totalTimeoutMs: 5000, callModel: adapter.callModel });
+    assert.equal(result.failure?.code, "transport"); assert.equal(result.turns[0].attempts.length, 1);
+    assert.ok(result.reason.includes(tag)); assert.ok(!JSON.stringify(result).includes("secret-body"));
+    assert.equal(fake.created.length, 0);
+  });
+}
+
+test("SDK connection errors retry while malformed responses and programming errors remain permanent", async () => {
+  for (const [failure, code] of [
+    [new ClientError("Transport", { cause: new Error("secret-network-detail") }), "provider_unavailable"],
+    [new ClientError("UnexpectedStatus", { cause: { status: 503 } }), "provider_unavailable"],
+    [new ClientError("UnexpectedStatus", { cause: { status: 404 } }), "transport"],
+    [new ClientError("MalformedResponse"), "transport"],
+    [new TypeError("Cannot read properties of undefined"), "transport"],
+    [new TypeError("Cannot read properties of undefined (reading network)"), "transport"],
+    [Object.assign(new Error("invalid argument"), { code: "UND_ERR_INVALID_ARG" }), "transport"],
+    [Object.assign(new Error("socket closed"), { code: "UND_ERR_SOCKET" }), "provider_unavailable"],
+    [new TypeError("fetch failed"), "provider_unavailable"],
+    [Object.assign(new Error("connection failed"), { code: "ECONNREFUSED" }), "provider_unavailable"],
+  ] as const) {
+    const fake = fakeClient(); fake.raw.model.list = async () => { throw failure; };
+    const adapter = new OpenCodeAdapter(fake.client, defaults(), "parent", "request", new Set());
+    adapter.setAssignment({ proposer: "glm", challenger: "deepseek" });
+    await assert.rejects(adapter.callModel("glm", "q", new AbortController().signal), error => {
+      assert.ok(error instanceof DebateError); assert.equal(error.code, code);
+      assert.ok(!error.message.includes("secret-network-detail")); return true;
+    });
+    adapter.release();
+  }
 });

@@ -11,6 +11,22 @@ export type OpenCodeClient = Pick<Plugin.Context, "session" | "model">;
 export const AGENT_ID = "debater";
 export const MODEL_NAMES: Record<Debater, string> = { glm: "GLM", deepseek: "DeepSeek" };
 export const NO_TOOLS = [{ action: "*", resource: "*", effect: "deny" as const }];
+/** SDK transport failures may retry; request/schema failures and programming errors may not. */
+function requestError(error: unknown): DebateError {
+  const record = error && typeof error === "object" ? error as { name?: unknown; _tag?: unknown; reason?: unknown; status?: unknown; statusCode?: unknown; code?: unknown; cause?: unknown; message?: unknown } : undefined;
+  const cause = record?.cause && typeof record.cause === "object" ? record.cause as { status?: unknown; code?: unknown } : undefined;
+  const status = [record?.status, record?.statusCode, cause?.status].find(value => typeof value === "number" && Number.isInteger(value));
+  if (typeof status === "number") return new DebateError(providerFailureCode(status), `OpenCode server request failed (HTTP ${status}). Check the server connection and request configuration.`);
+  // Declared SDK errors (UnauthorizedError, SessionNotFoundError, InvalidRequestError, ...)
+  // describe a rejected request, not a broken connection. Never echo a remote error body.
+  if (typeof record?._tag === "string") return new DebateError("transport", `OpenCode server rejected the request (${record._tag.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80)}). Check credentials, session, and request configuration.`);
+  const sdkTransport = record?.name === "ClientError" && record.reason === "Transport";
+  const networkCode = [record?.code, cause?.code].some(code => typeof code === "string" && /^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENETUNREACH|EHOSTUNREACH|EAI_AGAIN|UND_ERR_(?:CONNECT_TIMEOUT|HEADERS_TIMEOUT|BODY_TIMEOUT|SOCKET|DESTROYED|CLOSED))$/.test(code));
+  const fetchFailure = error instanceof TypeError && /^(?:fetch failed|failed to fetch|network request failed|socket hang up)$/i.test(error.message);
+  return sdkTransport || networkCode || fetchFailure
+    ? new DebateError("provider_unavailable", "OpenCode server request failed. Check the OpenCode server connection.")
+    : new DebateError("transport", "OpenCode request could not be completed. Check request configuration and plugin diagnostics.");
+}
 export function providerError(error: SessionStructuredError, retryAfter?: number, readCompatibility = false): DebateError {
   const nativeMessage = `${error.type}: ${error.message}`;
   const message = /free tier can only be used from within OpenCode/i.test(error.message)
@@ -38,7 +54,13 @@ export class OpenCodeAdapter implements DebateAdapter {
       if (!available) throw new DebateError("transport", `Model ${configured.providerID}/${configured.modelID} is unavailable. Configure backend: "openai-compatible" in .opencode/debate.config.json for the fallback.`);
       if (configured.variant && !available.variants.some(v => v.id === configured.variant)) throw new DebateError("transport", `Variant ${configured.variant} is unavailable for ${configured.modelID}`);
     }
-    const readPolicy = this.config.readCompatibility ? await RestrictedRead.create(parent.location.directory) : undefined;
+    let readPolicy: RestrictedRead | undefined;
+    if (this.config.readCompatibility) {
+      try { readPolicy = await RestrictedRead.create(parent.location.directory); }
+      catch (error) {
+        throw new DebateError("transport", `Restricted-read compatibility check failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     for (const debater of ["glm", "deepseek"] as const) {
       // Re-entry after a partial failure creates only the missing children, never duplicates.
       if (this.sessions.some(s => s.debater === debater)) continue;
@@ -132,11 +154,9 @@ export class OpenCodeAdapter implements DebateAdapter {
     try {
       return await abortable(work, signal);
     } catch (error) {
-      // SDK/network exceptions from the local server are transient connectivity failures the
-      // engine may retry; aborts and typed DebateErrors keep their own classification.
       if (signal.aborted) throw abortReason(signal);
       if (error instanceof DebateError) throw error;
-      throw new DebateError("provider_unavailable", "OpenCode server request failed. Check the OpenCode server connection.");
+      throw requestError(error);
     } finally { signal.removeEventListener("abort", stop); }
   };
   release() { for (const s of this.sessions) { this.owned.delete(s.id); this.restrictedReads.delete(s.id); this.retryHints.delete(s.id); } }

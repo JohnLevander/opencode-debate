@@ -367,6 +367,7 @@ test("runDebate validates timeouts before any model call", async () => {
 });
 
 const synth = (overrides: Partial<DebateResult> = {}): DebateResult => ({
+  verification: "not_independently_verified",
   question: "Q", assignment: { proposer: "glm", challenger: "deepseek" }, limits: { minRounds: 1, maxRounds: 4 },
   stopChecks: [], status: "error", reason: "test", rounds: 1, answer: "A", points: [], pointHistory: [],
   turns: [], startedAt: 0, endedAt: 1, ...overrides,
@@ -401,4 +402,18 @@ test("multiple open points render as separate bullets in order", () => {
 test("no open points on an unconverged debate renders the explicit no-agreement notice", () => {
   const output = renderResult(synth({ status: "stalemate", points: [] }), defaults(), "/log.json", []);
   assert.match(output, /### Unresolved points\nNo validated open points were recorded\. This does not establish agreement; the debate did not converge\./);
+});
+
+test("confident model agreement cannot label an unexecuted claim independently verified", async () => {
+  const claim = "The promise returned by finally settles before the original promise's catch runs.";
+  const { result } = scripted([
+    JSON.stringify({ answer: claim, points: [], agrees_with_current_answer: true, confidence: 1 }),
+    JSON.stringify({ answer: null, points: [], agrees_with_current_answer: true, confidence: 1 }),
+  ]);
+  const r = await result;
+  assert.equal(r.status, "converged"); assert.equal(r.verification, "not_independently_verified");
+  const output = renderResult(r, defaults(), "/log.json", []);
+  assert.match(output, /Agreed answer \(not independently verified\)/);
+  assert.match(output, /Model agreement is not proof of correctness/);
+  assert.ok(!output.includes("### Final answer")); assert.ok(output.includes(claim));
 });

@@ -26,6 +26,7 @@ export interface StopCheck {
   decision: "continue" | "converged" | "stalemate" | "max_rounds";
 }
 export interface DebateResult {
+  verification: "not_independently_verified";
   question: string; context?: string; assignment: { proposer: Debater; challenger: Debater };
   contributions?: ContributionScore;
   limits: { minRounds: number; maxRounds: number }; stopChecks: StopCheck[];

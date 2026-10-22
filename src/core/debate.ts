@@ -37,6 +37,7 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
   const startedAt = now();
   const proposer: Debater = opts.first === "random" ? ((opts.random ? opts.random() < 0.5 : randomInt(0, 2) === 0) ? "glm" : "deepseek") : opts.first;
   const result: DebateResult = {
+    verification: "not_independently_verified",
     question: opts.question, context: opts.context, assignment: { proposer, challenger: proposer === "glm" ? "deepseek" : "glm" },
     limits: { minRounds, maxRounds: opts.maxRounds }, stopChecks: [],
     status: "error", reason: "Debate did not finish", rounds: 0, answer: null, points: [], pointHistory: [], turns: [], startedAt, endedAt: startedAt,
