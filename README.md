@@ -45,7 +45,7 @@ To uninstall, preview with `bash scripts/install.sh --dry-run`, then run `bash s
 
 You can also explicitly ask the current agent to “debate this” or “use debate.” The tool is pinned in OpenCode's Code Mode catalog so it can be discovered with search. The command expands into a request to call the tool immediately; the calling model performs that initial invocation. The tool description prohibits unsolicited calls. It is an instruction to the calling model, not a perfect deterministic classifier of natural-language consent. In default strict mode, child debaters cannot invoke any tools. The explicitly enabled compatibility mode permits only the native `read` tool for a plugin-owned empty file, as described below.
 
-The tool takes `question` (trimmed, nonempty, at most 100,000 characters), optional `context` (at most 300,000 characters), `min_rounds` (1–8, default 1), `max_rounds` (1–8), `first` (`glm`, `deepseek`, or `random`), and `include_transcript` (default false). Random assignment uses Node/Bun crypto; explicit `first` chooses the Proposer. With the OpenCode backend, the two sessions retain separate histories, live under the calling session via `parentID`, and are titled `debate: <slug> | GLM/DeepSeek (proposer/challenger)`. The fallback instead keeps two separate conversations in memory; it creates no OpenCode child sessions. Read its full transcript in the JSON log or set `include_transcript: true`.
+The tool takes `question` (trimmed, nonempty, at most 100,000 characters), optional `context` (at most 300,000 characters), optional `context_file` and `context_sha256` (see [Exact context](#exact-context)), `min_rounds` (1–8, default 1), `max_rounds` (1–8), `first` (`glm`, `deepseek`, or `random`), and `include_transcript` (default false). Random assignment uses Node/Bun crypto; explicit `first` chooses the Proposer. With the OpenCode backend, the two sessions retain separate histories, live under the calling session via `parentID`, and are titled `debate: <slug> | GLM/DeepSeek (proposer/challenger)`. The fallback instead keeps two separate conversations in memory; it creates no OpenCode child sessions. Read its full transcript in the JSON log or set `include_transcript: true`.
 
 To guarantee time for both sides to respond, request a minimum explicitly:
 
@@ -68,6 +68,19 @@ Malformed Unicode in an answer or point triggers the bounded reply-repair path. 
 The result also includes a **Contribution winner (text-reuse estimate)** line and both models' credited word counts. Deterministic code assigns words in retained five-word phrases to the model that introduced those phrases first in a valid answer or point. Case and punctuation are normalized; a phrase must contain at least three words outside a small English stop-word list. Matching supplied question/context is excluded. Ties are explicit; short/unmatched answers and incomplete errors/cancellations have no declared winner. The log records the method and all counts.
 
 This measures retained wording. It can miss paraphrased ideas, and a largely retained opening answer will favor the Proposer. It does not judge correctness or change convergence, stalemate, or model behavior. Unresolved disagreements remain unresolved regardless of the contribution score.
+
+### Exact context
+
+An inline `context` is retyped by the calling model, and long contexts do not always survive that: in an October 23, 2026 run, three of five contexts of 9–18k characters arrived altered (netlist lines duplicated or dropped, a brace changed), although every end marker arrived. Two arguments avoid or detect that:
+
+- `context_file`: a path relative to `.opencode/debate-context/` in the session's directory. The tool reads that UTF-8 file's exact bytes itself (BOM, line endings and whitespace included). The real path must stay inside that directory, so a calling model cannot send other local files to the providers; symlinks pointing out of it, FIFOs, directories, invalid UTF-8 and files over 300,000 characters are refused. Pass `context` or `context_file`, not both.
+- `context_sha256`: the SHA-256 of the context's UTF-8 bytes. If the context the tool receives, inline or from the file, hashes differently, the debate stops before any child session is created and the journal records `contextError` with both hashes and the received text.
+
+Every result with a context ends its Details with `Context: <bytes> bytes, SHA-256 <hash>, read from <file> (exact file bytes)` or `inline (as passed by the calling model)`, plus whether it matched `context_sha256`. The journal keeps the same facts in `contextSource`. For example, with a file at `.opencode/debate-context/q14.txt`:
+
+```text
+/debate Is C27 reverse-biased as printed? Use context_file=q14.txt and context_sha256=<sha256 of the file>.
+```
 
 ## Configuration
 

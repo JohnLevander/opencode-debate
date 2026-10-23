@@ -112,6 +112,8 @@ Core `onEvent`/`onTurn` observers receive copies, cannot mutate engine state, an
 Args (Zod, per v2 conventions):
 - question: trimmed nonempty string (required; at most 100,000 characters)
 - context: string (optional; at most 300,000 characters; background material for both debaters)
+- context_file: string (optional; path relative to `.opencode/debate-context/` in the session directory; its exact UTF-8 bytes become the context; exclusive with context; real path must stay in that directory)
+- context_sha256: 64 hex characters (optional; the debate refuses to start unless the received context's UTF-8 bytes hash to it)
 - min_rounds: number (optional, 1 to 8, default 1; must not exceed the effective maximum)
 - max_rounds: number (optional, 1 to 8, default from config)
 - first: "glm", "deepseek", or "random" (optional, default "random")

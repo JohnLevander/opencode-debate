@@ -14,9 +14,13 @@ import { renderResult, VERIFICATION_NOTICE } from "./render.ts";
 import { originalResultInfo, resultWithOriginal, withoutOriginalAttachments } from "./result.ts";
 import { escapeInvalidUnicode } from "./core/unicode.ts";
 import { commandVerifier } from "./verifier.ts";
+import { CONTEXT_DIR, MAX_CONTEXT_CHARS, resolveContext, type ResolvedContext } from "./context.ts";
 
 export const debateArgs = z.object({
-  question: z.string().trim().min(1).max(100_000), context: z.string().max(300_000).optional(),
+  question: z.string().trim().min(1).max(100_000),
+  context: z.string().max(MAX_CONTEXT_CHARS).optional().describe("Background text, retyped by the calling model. Prefer context_file when exact text matters."),
+  context_file: z.string().min(1).max(4096).optional().describe(`Path, relative to ${CONTEXT_DIR} in the session directory, of a UTF-8 file whose exact bytes become the context. Use instead of context, never with it.`),
+  context_sha256: z.string().regex(/^[0-9a-fA-F]{64}$/).optional().describe("SHA-256 of the context's UTF-8 bytes. The debate refuses to start if the context it receives (inline or from context_file) has a different hash."),
   min_rounds: z.number().int().min(1).max(8).optional().describe("Minimum turns per side before convergence or stalemate may stop the debate; defaults to 1. An explicit max_rounds must be at least this large; an omitted one is raised to it."),
   max_rounds: z.number().int().min(1).max(8).optional(), first: z.enum(["glm", "deepseek", "random"]).default("random"),
   include_transcript: z.boolean().default(false),
@@ -32,11 +36,17 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
   let config: DebateConfig = defaults(); let configurationError: unknown;
   try { config = await loadConfig(ctx.location.directory, ctx.location.project.directory); }
   catch (error) { configurationError = error; }
+  // A context that cannot be read or fails its hash stops the debate before any model call, like a bad configuration.
+  let resolved: ResolvedContext = {}; let contextError: unknown;
+  try { resolved = await resolveContext(ctx.location.directory, args); }
+  catch (error) { contextError = error; }
+  const setupError = configurationError ?? contextError;
   // An omitted max_rounds rises to min_rounds so a requested minimum is never rejected by the configured default.
   const maxRounds = args.max_rounds ?? Math.max(config.defaultMaxRounds, args.min_rounds ?? 1);
   // A failed configuration load must not be journaled as if the defaults had been used.
   const configErrorText = configurationError === undefined ? undefined : configurationError instanceof Error ? configurationError.message : String(configurationError);
-  const journal = new DebateLog(config.logDir, args.question, { question: args.question, context: args.context,
+  const journal = new DebateLog(config.logDir, args.question, { question: args.question, context: resolved.context ?? args.context, contextSource: resolved.source,
+    ...(contextError === undefined ? {} : { contextError: contextError instanceof Error ? contextError.message : String(contextError) }),
     ...(configurationError === undefined ? { config } : { configError: configErrorText }), args,
     opencodeVersion: ctx.app.version, parentSessionID: execution.sessionID, limits: { minRounds: args.min_rounds ?? 1, maxRounds }, validationFailures: [], retryEvents: [], stopChecks: [], turns: [], pointHistory: [], sessions: [] });
   try { await journal.initialize(); }
@@ -62,11 +72,11 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
   if (execution.signal.aborted) cancel();
   try {
     const result = await runDebate({
-      question: args.question, context: args.context, maxRounds, minRounds: args.min_rounds,
+      question: args.question, context: resolved.context, maxRounds, minRounds: args.min_rounds,
       first: args.first, callTimeoutMs: config.callTimeoutMs, totalTimeoutMs: config.totalTimeoutMs, signal: execution.signal,
       verifier: config.verifier ? commandVerifier(config.verifier, ctx.location.directory) : undefined,
       callModel: async (...params) => {
-        if (configurationError) throw configurationError;
+        if (setupError) throw setupError;
         if (execution.agent === AGENT_ID) throw new Error("A debater cannot invoke the debate tool");
         return adapter.callModel(...params);
       },
@@ -93,8 +103,9 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
     });
     if (result.status === "cancelled" || result.status === "error") await adapter.cancelAll();
     await Promise.allSettled(pendingWrites);
-    let output = renderResult(result, config, journal.path, adapter.sessions, args.include_transcript);
-    const checkpoint = () => journal.update({ ...result, ...(configurationError === undefined ? { config } : { config: undefined, configError: configErrorText }),
+    let output = renderResult(result, config, journal.path, adapter.sessions, args.include_transcript, resolved.source);
+    // A refused context leaves result.context empty; keep what the tool actually received for diagnosis.
+    const checkpoint = () => journal.update({ ...result, context: resolved.context ?? args.context, ...(configurationError === undefined ? { config } : { config: undefined, configError: configErrorText }),
       args, sessions: adapter.sessions, diagnostics: adapter.diagnostics, interruptions: adapter.interruptions, finalResult: output, originalResult: originalResultInfo(output) });
     // The debate already finished: a failed final checkpoint must not replace its result with a generic error.
     // Retry once so a transient failure still leaves a log matching the returned original.
