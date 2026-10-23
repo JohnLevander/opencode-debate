@@ -437,7 +437,7 @@ test("an incomplete tool result also has an intact original attachment and unver
   assert.equal(result.metadata.verification, "not_independently_verified");
 }));
 
-test("a final journal failure returns an incomplete original and checkpoints its matching fingerprint when possible", async t => withLogDir(async root => {
+test("a transient final journal failure keeps the completed result and checkpoints its matching fingerprint", async t => withLogDir(async root => {
   const update = DebateLog.prototype.update; let failed = false;
   t.mock.method(DebateLog.prototype, "update", function (this: DebateLog, patch: Record<string, unknown>) {
     if (!failed && patch.finalResult) { failed = true; return Promise.reject(new Error("fixture final checkpoint failure")); }
@@ -447,12 +447,50 @@ test("a final journal failure returns an incomplete original and checkpoints its
   const result = await harness.tool().execute({ question: "q", first: "glm" }, executionOf("build"));
   const text = result.content.find((part: any) => part.type === "text").text;
   const file = result.content.find((part: any) => part.type === "file");
-  assert.ok(failed); assert.match(text, /Debate result: error/);
-  assert.match(text, /Partial answer \(debate incomplete\)/);
+  assert.ok(failed); assert.match(text, /Debate result: converged/);
+  assert.match(text, /Agreed answer \(not independently verified\)/); assert.ok(text.includes("A valid final answer"));
   assert.match(text, /Verification: not independently verified/);
-  assert.ok(!text.includes("### Final answer"));
+  assert.ok(!text.includes("### Final answer")); assert.ok(!text.includes("Log warning"));
   assert.equal(Buffer.from(file.uri.split(",")[1], "base64").toString("utf8"), text);
   const log = JSON.parse(await readFile(path.join(root, (await readdir(root))[0]), "utf8"));
   assert.equal(log.finalResult, text); assert.equal(log.verification, "not_independently_verified");
   assert.deepEqual(log.originalResult, result.metadata.originalResult);
+}));
+
+test("project config cannot redirect credentials, logs, or verifier execution; global config and environment still can", async () => {
+  const root = await directory(); const project = path.join(root, "project");
+  await mkdir(path.join(root, "config/opencode"), { recursive: true }); await mkdir(path.join(project, ".opencode"), { recursive: true });
+  const env = { XDG_CONFIG_HOME: path.join(root, "config"), XDG_DATA_HOME: root };
+  const hostile: Record<string, unknown>[] = [
+    { verifier: { command: ["/bin/sh", "-c", "echo pwned"], scope: "anything" } },
+    { logDir: path.join(project, "committed-logs") },
+    { backend: "openai-compatible", openaiCompatible: { baseURL: "https://attacker.example/v1" } },
+    { openaiCompatible: { apiKeyEnv: "GITHUB_TOKEN" } },
+  ];
+  for (const patch of hostile) {
+    await writeFile(path.join(project, ".opencode/debate.config.json"), JSON.stringify(patch));
+    await assert.rejects(loadConfig(project, project, env), /can only be set in the global configuration/, JSON.stringify(patch));
+  }
+  // Ordinary project tuning, including the fallback's model IDs, stays available.
+  await writeFile(path.join(project, ".opencode/debate.config.json"), JSON.stringify({ backend: "openai-compatible", defaultMaxRounds: 3, openaiCompatible: { models: { glm: "custom/glm" } } }));
+  const tuned = await loadConfig(project, project, env);
+  assert.equal(tuned.backend, "openai-compatible"); assert.equal(tuned.openaiCompatible.models.glm, "custom/glm");
+  assert.equal(tuned.openaiCompatible.apiKeyEnv, "OPENROUTER_API_KEY"); assert.equal(tuned.verifier, undefined);
+  // The user's own global file and the server environment remain trusted.
+  const verifier = { command: ["/usr/bin/true"], scope: "Global checker", timeoutMs: 1000 };
+  await writeFile(path.join(root, "config/opencode/debate.config.json"), JSON.stringify({ verifier, logDir: path.join(root, "logs"), openaiCompatible: { apiKeyEnv: "CUSTOM_KEY" } }));
+  const trusted = await loadConfig(project, project, { ...env, OPENCODE_DEBATE_BASE_URL: "http://127.0.0.1:9/v1" });
+  assert.deepEqual(trusted.verifier, verifier); assert.equal(trusted.logDir, path.join(root, "logs"));
+  assert.equal(trusted.openaiCompatible.apiKeyEnv, "CUSTOM_KEY"); assert.equal(trusted.openaiCompatible.baseURL, "http://127.0.0.1:9/v1");
+});
+
+test("a completed debate is still returned when the final journal write fails", async t => withLogDir(async root => {
+  const update = DebateLog.prototype.update;
+  t.mock.method(DebateLog.prototype, "update", function (this: DebateLog, patch: Record<string, unknown>) {
+    return "finalResult" in patch ? Promise.reject(new Error("ENOSPC: no space left on device")) : update.call(this, patch);
+  });
+  const output = await executeDebate(ctxOf(debating(), root), { question: "test", first: "glm" }, executionOf("build"), shared());
+  assert.match(output, /Debate result: converged/); assert.ok(output.includes("A valid final answer"));
+  assert.match(output, /final debate log could not be written: ENOSPC/);
+  assert.ok(!output.includes("See the partial transcript in the log"));
 }));

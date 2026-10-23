@@ -46,6 +46,16 @@ function merge(base: Record<string, unknown>, patch: Record<string, unknown>): R
   }
   return result;
 }
+// These choose where credentials and transcripts are sent and which local program runs. A cloned
+// repository's .opencode file must not redirect them; only the global file and server environment may.
+const GLOBAL_ONLY = [["verifier"], ["logDir"], ["openaiCompatible", "baseURL"], ["openaiCompatible", "apiKeyEnv"]] as const;
+function rejectGlobalOnly(parsed: Record<string, unknown>, globalFile: string): void {
+  for (const [key, nested] of GLOBAL_ONLY) {
+    const value = parsed[key];
+    const present = nested === undefined ? value !== undefined : !!value && typeof value === "object" && nested in value;
+    if (present) throw new Error(`${nested ? `${key}.${nested}` : key} can only be set in the global configuration (${globalFile}) or the OpenCode server environment`);
+  }
+}
 export async function loadConfig(directory: string, projectRoot = directory, env: NodeJS.ProcessEnv = process.env): Promise<DebateConfig> {
   const globalFile = path.join(env.XDG_CONFIG_HOME ?? path.join(homedir(), ".config"), "opencode/debate.config.json");
   const directories = [path.resolve(directory)];
@@ -64,6 +74,7 @@ export async function loadConfig(directory: string, projectRoot = directory, env
     try {
       const parsed = JSON.parse(contents);
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Expected a JSON object");
+      if (file !== globalFile) rejectGlobalOnly(parsed, globalFile);
       config = merge(config, parsed);
     } catch (error) { throw new Error(`Invalid debate configuration ${file}: ${error instanceof Error ? error.message : String(error)}`); }
   }

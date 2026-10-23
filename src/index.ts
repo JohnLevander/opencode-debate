@@ -91,9 +91,18 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
     });
     if (result.status === "cancelled" || result.status === "error") await adapter.cancelAll();
     await Promise.allSettled(pendingWrites);
-    const output = renderResult(result, config, journal.path, adapter.sessions, args.include_transcript);
-    await journal.update({ ...result, ...(configurationError === undefined ? { config } : { config: undefined, configError: configErrorText }),
+    let output = renderResult(result, config, journal.path, adapter.sessions, args.include_transcript);
+    const checkpoint = () => journal.update({ ...result, ...(configurationError === undefined ? { config } : { config: undefined, configError: configErrorText }),
       args, sessions: adapter.sessions, diagnostics: adapter.diagnostics, interruptions: adapter.interruptions, finalResult: output, originalResult: originalResultInfo(output) });
+    // The debate already finished: a failed final checkpoint must not replace its result with a generic error.
+    // Retry once so a transient failure still leaves a log matching the returned original.
+    try { await checkpoint(); }
+    catch {
+      try { await checkpoint(); }
+      catch (error) {
+        output = escapeInvalidUnicode(`${output}\n\n### Log warning\nThe final debate log could not be written: ${error instanceof Error ? error.message : String(error)}. This result is the only complete copy; ${journal.path} holds at most an earlier checkpoint.`);
+      }
+    }
     progress(`Debate ended: ${result.status}. ${result.rounds} Challenger round(s). Log: ${journal.path}`);
     return output;
   } catch (error) {

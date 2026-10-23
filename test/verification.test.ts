@@ -65,12 +65,17 @@ test("a verifier that hangs is aborted and cannot turn late evidence into agreem
 });
 
 test("configured verification runs through the public tool and is checkpointed with the exact answer", async t => {
-  const root = await tempRoot("verification-plugin-"); await mkdir(path.join(root, ".opencode"));
+  const root = await tempRoot("verification-plugin-"); await mkdir(path.join(root, "config/opencode"), { recursive: true });
   const runner = path.join(root, "check.mjs");
   await writeFile(runner, `let input='';for await(const chunk of process.stdin)input+=chunk;const {answer}=JSON.parse(input);console.log(JSON.stringify({status:answer==='body receives a Promise'?'passed':'failed',summary:'Independent Node fixture: body receives a Promise',checksRun:1}));`);
-  await writeFile(path.join(root, ".opencode/debate.config.json"), JSON.stringify({ logDir: path.join(root, "logs"), verifier: { command: [process.execPath, runner], scope: "Iterator prediction", timeoutMs: 1000 } }));
-  const old = process.env.OPENCODE_DEBATE_LOG_DIR; delete process.env.OPENCODE_DEBATE_LOG_DIR;
-  t.after(() => { if (old === undefined) delete process.env.OPENCODE_DEBATE_LOG_DIR; else process.env.OPENCODE_DEBATE_LOG_DIR = old; });
+  // Verifier commands and log locations are trusted only from the global file, never a project's .opencode.
+  await writeFile(path.join(root, "config/opencode/debate.config.json"), JSON.stringify({ logDir: path.join(root, "logs"), verifier: { command: [process.execPath, runner], scope: "Iterator prediction", timeoutMs: 1000 } }));
+  const old = process.env.OPENCODE_DEBATE_LOG_DIR, oldConfig = process.env.XDG_CONFIG_HOME;
+  delete process.env.OPENCODE_DEBATE_LOG_DIR; process.env.XDG_CONFIG_HOME = path.join(root, "config");
+  t.after(() => {
+    if (old === undefined) delete process.env.OPENCODE_DEBATE_LOG_DIR; else process.env.OPENCODE_DEBATE_LOG_DIR = old;
+    if (oldConfig === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = oldConfig;
+  });
   const fake = fakeClient(); let p = 0; const original = fake.raw.session.prompt;
   fake.raw.session.prompt = async input => {
     const admitted = await original(input); const text = input.sessionID === "child-0" ? reply(++p === 1 ? "always unwrapped" : "body receives a Promise") : reply(null);

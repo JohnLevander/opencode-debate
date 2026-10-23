@@ -105,7 +105,7 @@ To debate a review, attach the review text and any evidence you want the partici
 | `Endpoint is unavailable`, HTTP 429 | Free-provider capacity can reject either the calling model or a debater. Stop a caller stuck in repeated UI retries and try again later. The engine's bounded retries apply only after the debate tool starts; they do not control the parent agent's retries. No key is needed to resolve a capacity error. |
 | `FreeTierError` before an answer | Verify `readCompatibility: true` in the effective debate config and restart the hosting server. Strict no-tools mode failed with this error on the tested version. |
 | `Invalid reply twice` (older logs: `Invalid JSON twice`) | A participant violated the protocol after the single repair attempt. Read the partial answer and open points; the engine has not declared convergence. |
-| Different model or backend is used | Project `.opencode/debate.config.json` and `OPENCODE_DEBATE_*` variables in the server's environment override global settings. Review those overrides. |
+| Different model or backend is used | Project `.opencode/debate.config.json` and `OPENCODE_DEBATE_*` variables in the server's environment override global settings. Review those overrides. Projects cannot set `verifier`, `logDir`, `openaiCompatible.baseURL`, or `openaiCompatible.apiKeyEnv`; move those to the global file. |
 | Stop shows “Step interrupted” | OpenChamber interrupts the caller too. The plugin retains partial results in the log and interrupts both children. |
 
 If the free models disappear from OpenCode's inventory, this preset cannot restore them. Model availability and successful contested multi-round execution remain limitations, not installation guarantees.

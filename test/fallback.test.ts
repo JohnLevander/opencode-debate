@@ -160,10 +160,15 @@ for (const scenario of ["converged", "cancelled", "rate_limit", "missing_key"] a
     await mkdir(".test-runtime", { recursive: true }); const root = await tempRoot("fallback-");
     const cfg = config(server.baseURL); cfg.logDir = path.join(root, "logs");
     cfg.openaiCompatible.apiKeyEnv = "OPENCODE_DEBATE_LOCAL_MOCK_KEY";
-    await mkdir(path.join(root, ".opencode")); await writeFile(path.join(root, ".opencode/debate.config.json"), JSON.stringify(cfg));
-    const oldKey = process.env.OPENCODE_DEBATE_LOCAL_MOCK_KEY;
+    // The endpoint, key variable, and log location are trusted only from the global file.
+    await mkdir(path.join(root, "config/opencode"), { recursive: true }); await writeFile(path.join(root, "config/opencode/debate.config.json"), JSON.stringify(cfg));
+    const oldKey = process.env.OPENCODE_DEBATE_LOCAL_MOCK_KEY, oldConfig = process.env.XDG_CONFIG_HOME;
     if (scenario !== "missing_key") process.env.OPENCODE_DEBATE_LOCAL_MOCK_KEY = key; else delete process.env.OPENCODE_DEBATE_LOCAL_MOCK_KEY;
-    t.after(() => { if (oldKey === undefined) delete process.env.OPENCODE_DEBATE_LOCAL_MOCK_KEY; else process.env.OPENCODE_DEBATE_LOCAL_MOCK_KEY = oldKey; });
+    process.env.XDG_CONFIG_HOME = path.join(root, "config");
+    t.after(() => {
+      if (oldKey === undefined) delete process.env.OPENCODE_DEBATE_LOCAL_MOCK_KEY; else process.env.OPENCODE_DEBATE_LOCAL_MOCK_KEY = oldKey;
+      if (oldConfig === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = oldConfig;
+    });
     // Any SDK call fails: fallback conversations must stay entirely in memory.
     const ctx = { location: { directory: root, project: { directory: root } }, app: { version: "2.0.32" },
       session: new Proxy({}, { get() { throw new Error("Unexpected SDK child access"); } }), model: new Proxy({}, { get() { throw new Error("Unexpected SDK model access"); } }),
