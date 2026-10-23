@@ -5,7 +5,7 @@ import { parseReply } from "../src/core/parse.ts";
 import { DebateError, type DebateOptions, type DebateResult, type Reply, type ReplyPoint } from "../src/core/types.ts";
 import { renderResult } from "../src/render.ts";
 import { defaults } from "../src/config.ts";
-import { INTERRUPTION_PREFIX } from "../src/prompts.ts";
+import { FORMAT, INTERRUPTION_PREFIX, jsonRepairPrompt, missingPointsPrompt, openingPrompt, revisionPrompt } from "../src/prompts.ts";
 
 const p = (id = "C1", status: ReplyPoint["status"] = "open"): ReplyPoint => ({ id, status, summary: `Issue ${id}`, note: `${status} because of specific evidence` });
 const json = (answer: string | null = "The answer", points: ReplyPoint[] = [], agrees = false) => JSON.stringify({ answer, points, agrees_with_current_answer: agrees, confidence: 0.8 } satisfies Reply);
@@ -458,4 +458,14 @@ test("model-written text cannot forge result headings or independent-check label
   assert.deepEqual(visible.split("\n").filter(line => /^#{1,6} /.test(line)),
     ["## Debate result: max_rounds", "### Current answer (not converged)", "### Unresolved points", "#### C1 (open)", "### Details", "### Transcript", "#### P0 — opencode/glm-5.3-flash-free (proposer)", "#### C1 — opencode/deepseek-v4.1-flash-free (challenger)"]);
   assert.ok(output.includes(answer) && output.includes(point.note), "model text is preserved verbatim inside its fence");
+});
+
+test("a deliverable that is itself JSON stays a string inside answer and is never adopted as the reply", async () => {
+  // Live: asked for a JSON object with the reply's own keys, the Proposer emitted it as its reply and lost the deliverable.
+  const guidance = /deliverable is itself JSON[^]*inside the answer string[^]*never replaces/;
+  for (const prompt of [FORMAT, openingPrompt("Q"), revisionPrompt("{}", []), missingPointsPrompt(["C1"], []), jsonRepairPrompt("proposer", "bad", [], 1), jsonRepairPrompt("challenger", "bad", [], 1)]) assert.match(prompt, guidance);
+  const deliverable = JSON.stringify({ answer: "100", points: [], agrees_with_current_answer: true, confidence: 0.99 });
+  const { result } = scripted([json("```json\n" + deliverable + "\n```"), json(null, [], true)]);
+  const r = await result; assert.equal(r.status, "converged"); assert.equal(r.answer, "```json\n" + deliverable + "\n```");
+  assert.ok(renderResult(r, defaults(), "/log.json", []).includes(deliverable));
 });

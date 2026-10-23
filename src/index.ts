@@ -17,7 +17,7 @@ import { commandVerifier } from "./verifier.ts";
 
 export const debateArgs = z.object({
   question: z.string().trim().min(1).max(100_000), context: z.string().max(300_000).optional(),
-  min_rounds: z.number().int().min(1).max(8).optional().describe("Minimum turns per side before convergence or stalemate may stop the debate; defaults to 1. Must not exceed max_rounds."),
+  min_rounds: z.number().int().min(1).max(8).optional().describe("Minimum turns per side before convergence or stalemate may stop the debate; defaults to 1. An explicit max_rounds must be at least this large; an omitted one is raised to it."),
   max_rounds: z.number().int().min(1).max(8).optional(), first: z.enum(["glm", "deepseek", "random"]).default("random"),
   include_transcript: z.boolean().default(false),
 }).strict();
@@ -32,11 +32,13 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
   let config: DebateConfig = defaults(); let configurationError: unknown;
   try { config = await loadConfig(ctx.location.directory, ctx.location.project.directory); }
   catch (error) { configurationError = error; }
+  // An omitted max_rounds rises to min_rounds so a requested minimum is never rejected by the configured default.
+  const maxRounds = args.max_rounds ?? Math.max(config.defaultMaxRounds, args.min_rounds ?? 1);
   // A failed configuration load must not be journaled as if the defaults had been used.
   const configErrorText = configurationError === undefined ? undefined : configurationError instanceof Error ? configurationError.message : String(configurationError);
   const journal = new DebateLog(config.logDir, args.question, { question: args.question, context: args.context,
     ...(configurationError === undefined ? { config } : { configError: configErrorText }), args,
-    opencodeVersion: ctx.app.version, parentSessionID: execution.sessionID, limits: { minRounds: args.min_rounds ?? 1, maxRounds: args.max_rounds ?? config.defaultMaxRounds }, validationFailures: [], retryEvents: [], stopChecks: [], turns: [], pointHistory: [], sessions: [] });
+    opencodeVersion: ctx.app.version, parentSessionID: execution.sessionID, limits: { minRounds: args.min_rounds ?? 1, maxRounds }, validationFailures: [], retryEvents: [], stopChecks: [], turns: [], pointHistory: [], sessions: [] });
   try { await journal.initialize(); }
   catch (error) { return escapeInvalidUnicode(`## Debate result: error\n${VERIFICATION_NOTICE}\n### Partial answer (debate incomplete)\nNo answer was gathered.\n### Details\nCannot create the required debate log at ${journal.path}: ${error instanceof Error ? error.message : String(error)}`); }
   const adapter: DebateAdapter = config.backend === "opencode"
@@ -60,7 +62,7 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
   if (execution.signal.aborted) cancel();
   try {
     const result = await runDebate({
-      question: args.question, context: args.context, maxRounds: args.max_rounds ?? config.defaultMaxRounds, minRounds: args.min_rounds,
+      question: args.question, context: args.context, maxRounds, minRounds: args.min_rounds,
       first: args.first, callTimeoutMs: config.callTimeoutMs, totalTimeoutMs: config.totalTimeoutMs, signal: execution.signal,
       verifier: config.verifier ? commandVerifier(config.verifier, ctx.location.directory) : undefined,
       callModel: async (...params) => {
@@ -74,7 +76,7 @@ export async function executeDebate(ctx: Plugin.Context, input: DebateArgs, exec
           progress(`Debate starting: ${MODEL_NAMES[event.assignment.proposer]} (proposer), ${MODEL_NAMES[event.assignment.challenger]} (challenger)`);
         } else if (event.type === "turn_start") {
           const t = event.turn;
-          progress(t.round === 0 ? `${MODEL_NAMES[t.debater]} (proposer) preparing the opening answer.` : `Round ${t.round}/${args.max_rounds ?? config.defaultMaxRounds}: ${MODEL_NAMES[t.debater]} (${t.role}) ${t.role === "challenger" ? "reviewing the revision" : "responding and revising"}.`);
+          progress(t.round === 0 ? `${MODEL_NAMES[t.debater]} (proposer) preparing the opening answer.` : `Round ${t.round}/${maxRounds}: ${MODEL_NAMES[t.debater]} (${t.role}) ${t.role === "challenger" ? "reviewing the revision" : "responding and revising"}.`);
         } else if (event.type === "validation_failure") {
           validationFailures.push(event); save({ validationFailures });
           progress(`${event.turnID}: invalid reply (${event.reason}); ${event.repair ? "requesting one repair" : "stopping after failed repair"}.`);

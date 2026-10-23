@@ -59,7 +59,7 @@ export class RestrictedRead {
     } catch (error) {
       const turn = sessionID === undefined ? undefined : this.turns.get(sessionID);
       if (turn && ++turn.denials >= MAX_FORBIDDEN_TOOL_CALLS && !turn.controller.signal.aborted) {
-        turn.controller.abort(new DebateError("protocol", `Debater repeatedly attempted forbidden tools (${turn.denials} denied calls); native turn interrupted`));
+        turn.controller.abort(new DebateError("tool_violation", `Debater repeatedly attempted forbidden tools (${turn.denials} denied calls); native turn interrupted`));
       }
       throw error;
     }

@@ -9,7 +9,7 @@ export interface Point {
 }
 export interface Attempt {
   message: string; startedAt: number; endedAt: number; text?: string; reasoning?: string;
-  parsed?: Reply; error?: string; errorCode?: DebateErrorCode; kind: "initial" | "timeout_retry" | "json_repair" | "missing_points" | "rate_limit_retry" | "provider_retry";
+  parsed?: Reply; error?: string; errorCode?: DebateErrorCode; kind: "initial" | "timeout_retry" | "tool_repair" | "json_repair" | "missing_points" | "rate_limit_retry" | "provider_retry";
 }
 export interface Turn {
   id: string; round: number; debater: Debater; role: Role; message: string;
@@ -62,7 +62,7 @@ export interface DebateOptions {
   verifier?: Verifier;
   signal?: AbortSignal; random?: () => number; now?: () => number;
 }
-export type DebateErrorCode = "call_timeout" | "total_timeout" | "cancelled" | "rate_limit" | "provider_unavailable" | "protocol" | "transport" | "verification";
+export type DebateErrorCode = "call_timeout" | "total_timeout" | "cancelled" | "rate_limit" | "provider_unavailable" | "protocol" | "tool_violation" | "transport" | "verification";
 export class DebateError extends Error {
   constructor(public code: DebateErrorCode, message: string, public retryAfterMs?: number) {
     super(message); this.name = "DebateError";

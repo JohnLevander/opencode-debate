@@ -494,3 +494,14 @@ test("a completed debate is still returned when the final journal write fails", 
   assert.match(output, /final debate log could not be written: ENOSPC/);
   assert.ok(!output.includes("See the partial transcript in the log"));
 }));
+
+test("min_rounds above the configured default raises an omitted max_rounds instead of failing", async () => withLogDir(async root => {
+  // Live: "min_rounds=6, do not pass max_rounds" with the default max of 4 was rejected before any model call.
+  const output = await executeDebate(ctxOf(debating(), root), { question: "test", first: "glm", min_rounds: 6 }, executionOf("build"), shared());
+  assert.match(output, /Debate result: converged/); assert.match(output, /Rounds: 6/);
+  const log = JSON.parse(await readFile(path.join(root, (await readdir(root))[0]), "utf8"));
+  assert.deepEqual(log.limits, { minRounds: 6, maxRounds: 6 }); assert.equal(log.rounds, 6);
+  // An explicit max_rounds is still honored and still validated against min_rounds.
+  const explicit = await executeDebate(ctxOf(debating(), root), { question: "test", first: "glm", min_rounds: 6, max_rounds: 5 }, executionOf("build"), shared());
+  assert.match(explicit, /min_rounds must be an integer from 1 to max_rounds/);
+}));

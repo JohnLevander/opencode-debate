@@ -3,7 +3,7 @@ import { scoreContributions } from "./contribution.ts";
 import { parseReply } from "./parse.ts";
 import { DebateError, type DebateEvent, type DebateOptions, type DebateResult, type Debater, type IndependentCheck, type Point, type Reply, type Role, type Turn } from "./types.ts";
 import { checkVerdictSchema } from "./verification.ts";
-import { checkEvidence, VERIFIER_PROPOSAL_GUIDANCE, openingPrompt, firstCritiquePrompt, critiquePrompt, revisionPrompt, missingPointsPrompt, jsonRepairPrompt, INTERRUPTION_PREFIX } from "../prompts.ts";
+import { checkEvidence, VERIFIER_PROPOSAL_GUIDANCE, openingPrompt, firstCritiquePrompt, critiquePrompt, revisionPrompt, missingPointsPrompt, jsonRepairPrompt, INTERRUPTION_PREFIX, TOOL_VIOLATION_PREFIX } from "../prompts.ts";
 
 export function abortReason(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new DebateError("cancelled", "Debate cancelled");
@@ -99,7 +99,7 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
     }
   };
   // Budgets belong to the logical turn, including all JSON/missing-point repairs.
-  const budgets = new Map<string, { timedOut: boolean; providerRetries: number }>();
+  const budgets = new Map<string, { timedOut: boolean; toolRepaired: boolean; providerRetries: number }>();
   const invoke = async (turn: Turn, message: string, kind: Turn["attempts"][number]["kind"]): Promise<{ text: string; reasoning?: string }> => {
     const budget = budgets.get(turn.id)!;
     for (;;) {
@@ -134,6 +134,12 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
         emit({ type: "retry", turnID: turn.id, reason: "call_timeout", delayMs: 0 });
         continue;
       }
+      // A stray tool loop is one bad native call, not a failed debate: re-ask once without tools.
+      if (failure instanceof DebateError && failure.code === "tool_violation" && !budget.toolRepaired) {
+        budget.toolRepaired = true; message = `${TOOL_VIOLATION_PREFIX}\n${message}`; kind = "tool_repair";
+        emit({ type: "retry", turnID: turn.id, reason: "tool_violation", delayMs: 0 });
+        continue;
+      }
       const limited = rateLimit(failure);
       const unavailable = failure instanceof DebateError && failure.code === "provider_unavailable";
       if ((limited || unavailable) && budget.providerRetries < 2) {
@@ -165,7 +171,7 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
   const takeTurn = async (id: string, round: number, role: Role, message: string): Promise<Turn> => {
     live();
     const turn: Turn = { id, round, role, debater: result.assignment[role], message, startedAt: now(), endedAt: now(), retries: 0, attempts: [] };
-    budgets.set(id, { timedOut: false, providerRetries: 0 });
+    budgets.set(id, { timedOut: false, toolRepaired: false, providerRetries: 0 });
     result.turns.push(turn);
     emit({ type: "turn_start", turn: structuredClone(turn) });
     let repairedJSON = false, repairedMissing = false;

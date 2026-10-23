@@ -58,7 +58,7 @@ test("[03] repeated forbidden reads interrupt only that native turn before its d
       if (fake.interrupts.includes(input.sessionID)) break;
     }
   } });
-  await assert.rejects(adapter.callModel("glm", "Reason without files", new AbortController().signal), error => error instanceof DebateError && error.code === "protocol" && /forbidden/i.test(error.message));
+  await assert.rejects(adapter.callModel("glm", "Reason without files", new AbortController().signal), error => error instanceof DebateError && error.code === "tool_violation" && /forbidden/i.test(error.message));
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(denied, 3); assert.ok(fake.interrupts.length > 0); assert.ok(fake.interrupts.every(id => id === "child-0"));
 });
@@ -184,4 +184,37 @@ test("[10] a dot-dot-prefixed child directory still inherits project configurati
   const config = await loadConfig(nested, project, env); assert.equal(config.models.glm.variant, "low"); assert.equal(config.callTimeoutMs, 444); assert.equal(config.defaultMaxRounds, 7);
   const sibling = path.join(root, "project-sibling"); await mkdir(path.join(sibling, ".opencode"), { recursive: true });
   const outside = await loadConfig(sibling, project, env); assert.equal(outside.models.glm.variant, undefined); assert.equal(outside.callTimeoutMs, 300_000);
+});
+
+test("[11] a forbidden-tool interrupt is repaired once inside its turn instead of ending the debate", async t => {
+  const fake = fakeClient(); const hooks: Record<string, Function> = {};
+  // Install before ctx copies session.prompt. The Challenger's first native call loops on forbidden reads (as GLM did live); its repaired call replies normally.
+  let challengerCalls = 0;
+  const original = fake.raw.session.prompt;
+  fake.raw.session.prompt = async (input: any) => {
+    if (input.sessionID === "child-1" && ++challengerCalls === 1) {
+      for (let i = 0; i < 20 && !fake.interrupts.includes("child-1"); i++) await hooks["execute.before"]({ agent: "debater", sessionID: "child-1", tool: "read", input: { path: "/project" } }).catch(() => {});
+    }
+    const admitted = await original(input);
+    fake.messages.get(input.sessionID)!.at(-1).content = [{ type: "text", text: input.sessionID === "child-0" ? json("Spaces, scoped to general-purpose code") : json(null, [], true) }];
+    return admitted;
+  };
+  const ctx = { ...fake.client, session: { ...fake.raw.session, hook: async (name: string, fn: Function) => { hooks[name] = fn; } }, tool: { hook: async (name: string, fn: Function) => { hooks[name] = fn; } } } as unknown as Plugin.Context;
+  const owned = new Set<string>(); const reads = new Map(); const config = defaults(); config.readCompatibility = true;
+  await registerToolIsolation(ctx, owned, reads);
+  const adapter = new OpenCodeAdapter(ctx, config, "parent", "denial-repair", owned, new Map(), reads);
+  t.after(() => adapter.release());
+  const result = await runDebate({ ...options, callModel: adapter.callModel, onEvent: event => { if (event.type === "start") adapter.setAssignment(event.assignment); } });
+  assert.equal(result.status, "converged", result.reason);
+  assert.equal(result.answer, "Spaces, scoped to general-purpose code");
+  const critique = result.turns.find(turn => turn.id === "C1")!;
+  assert.deepEqual(critique.attempts.map(a => [a.kind, a.errorCode]), [["initial", "tool_violation"], ["tool_repair", undefined]]);
+  assert.match(critique.attempts[1].message, /attempted forbidden tool calls/); assert.equal(challengerCalls, 2);
+});
+test("[11] a second forbidden-tool interrupt in the same turn ends the debate with its own failure code", async () => {
+  const violation = () => new DebateError("tool_violation", "Debater repeatedly attempted forbidden tools (3 denied calls); native turn interrupted");
+  const replies: (string | Error)[] = [json("Answer"), violation(), violation()];
+  const result = await runDebate({ ...options, callModel: async () => { const next = replies.shift()!; if (next instanceof Error) throw next; return { text: next }; } });
+  assert.equal(result.status, "error"); assert.equal(result.answer, "Answer");
+  assert.deepEqual(result.failure && { code: result.failure.code, turnID: result.failure.turnID, attempts: result.failure.attempts }, { code: "tool_violation", turnID: "C1", attempts: 2 });
 });
