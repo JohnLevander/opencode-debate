@@ -269,7 +269,11 @@ test("fallback engine recovers from HTTP 503 without appending the failed reques
     json(response, completion(reply(n === 3)));
   });
   const adapter = new OpenAICompatibleAdapter(config(server.baseURL), { DEBATE_TEST_API_KEY: key }); t.after(() => adapter.release());
-  const result = await runDebate({ question: "test", maxRounds: 1, first: "glm", callTimeoutMs: 2000, totalTimeoutMs: 5000, callModel: adapter.callModel });
+  t.mock.timers.enable({ apis: ["setTimeout"] }); // skip the 5 s outage wait without changing its schedule
+  const pending = runDebate({ question: "test", maxRounds: 1, first: "glm", callTimeoutMs: 2000, totalTimeoutMs: 30_000, callModel: adapter.callModel });
+  let settled = false; void pending.finally(() => { settled = true; });
+  for (let i = 0; i < 400 && !settled; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(100); }
+  const result = await pending;
   assert.equal(result.status, "converged"); assert.equal(server.requests.length, 3);
   assert.deepEqual(server.requests[1].body.messages, server.requests[0].body.messages);
   assert.equal(result.turns[0].attempts[0].errorCode, "provider_unavailable");
@@ -398,7 +402,7 @@ test("repeated interrupted bodies exhaust the shared provider retry budget after
   t.after(() => adapter.release());
   const events: any[] = [];
   const result = runDebate({ question: "test", maxRounds: 1, first: "glm", callTimeoutMs: 2000, totalTimeoutMs: 30_000, callModel: adapter.callModel, onEvent: e => events.push(e) });
-  for (let i = 0; i < 40; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(250); }
+  for (let i = 0; i < 120; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(500); }
   const r = await result;
   assert.equal(r.status, "error"); assert.equal(calls, 3);
   assert.equal(r.failure?.code, "provider_unavailable"); assert.equal(r.failure?.attempts, 3);
@@ -537,14 +541,14 @@ test("body retry hints feed the engine backoff for rate limits", { timeout: 8000
 test("body retry hints feed the engine backoff for outages", { timeout: 8000 }, async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
-    (async () => Response.json({ retry_after: 3, error: { code: "529" } })) as typeof fetch);
+    (async () => Response.json({ retry_after: 30, error: { code: "529" } })) as typeof fetch);
   t.after(() => adapter.release());
   const events: any[] = [];
-  const result = runDebate({ question: "test", maxRounds: 1, first: "glm", callTimeoutMs: 2000, totalTimeoutMs: 30_000, callModel: adapter.callModel, onEvent: e => events.push(e) });
-  for (let i = 0; i < 40; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(250); }
+  const result = runDebate({ question: "test", maxRounds: 1, first: "glm", callTimeoutMs: 2000, totalTimeoutMs: 120_000, callModel: adapter.callModel, onEvent: e => events.push(e) });
+  for (let i = 0; i < 200; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(500); }
   const r = await result;
   assert.equal(r.status, "error");
-  assert.deepEqual(events.filter(e => e.type === "retry").map(e => [e.reason, e.delayMs]), [["provider_unavailable", 3000], ["provider_unavailable", 3000]]);
+  assert.deepEqual(events.filter(e => e.type === "retry").map(e => [e.reason, e.delayMs]), [["provider_unavailable", 30000], ["provider_unavailable", 30000]]);
 });
 test("an explicit Retry-After header outranks a body retry hint", async () => {
   const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
@@ -563,14 +567,14 @@ test("an interrupted body keeps the response Retry-After hint", async () => {
 test("interrupted-body header hints feed the engine backoff", { timeout: 8000 }, async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
-    (async () => interruptedBody(200, "3")) as typeof fetch);
+    (async () => interruptedBody(200, "30")) as typeof fetch);
   t.after(() => adapter.release());
   const events: any[] = [];
-  const result = runDebate({ question: "test", maxRounds: 1, first: "glm", callTimeoutMs: 2000, totalTimeoutMs: 30_000, callModel: adapter.callModel, onEvent: e => events.push(e) });
-  for (let i = 0; i < 40; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(250); }
+  const result = runDebate({ question: "test", maxRounds: 1, first: "glm", callTimeoutMs: 2000, totalTimeoutMs: 120_000, callModel: adapter.callModel, onEvent: e => events.push(e) });
+  for (let i = 0; i < 200; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(500); }
   const r = await result;
   assert.equal(r.status, "error");
-  assert.deepEqual(events.filter(e => e.type === "retry").map(e => e.delayMs), [3000, 3000]);
+  assert.deepEqual(events.filter(e => e.type === "retry").map(e => e.delayMs), [30000, 30000]);
 });
 
 for (const status of [429, 503]) {
@@ -594,17 +598,17 @@ for (const status of [429, 503]) {
     const adapter = new OpenAICompatibleAdapter(config("http://127.0.0.1:1/v1"), { DEBATE_TEST_API_KEY: key },
       (async (_url, init) => {
         requests.push(JSON.parse(init!.body as string));
-        return requests.length === 1 ? Response.json({ error: { retry_after: 3 } }, { status })
+        return requests.length === 1 ? Response.json({ error: { retry_after: 30 } }, { status })
           : Response.json(completion(reply(requests.length === 3)));
       }) as typeof fetch);
     t.after(() => adapter.release());
     const events: any[] = [];
-    const result = runDebate({ question: "test", maxRounds: 1, first: "glm", callTimeoutMs: 2000, totalTimeoutMs: 30_000,
+    const result = runDebate({ question: "test", maxRounds: 1, first: "glm", callTimeoutMs: 2000, totalTimeoutMs: 120_000,
       callModel: adapter.callModel, onEvent: e => events.push(e) });
-    for (let i = 0; i < 40; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(250); }
+    for (let i = 0; i < 120; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(500); }
     assert.equal((await result).status, "converged"); assert.equal(requests.length, 3);
     assert.deepEqual(requests[1], requests[0]);
-    assert.deepEqual(events.filter(e => e.type === "retry").map(e => [e.reason, e.delayMs]), [[expected, 3000]]);
+    assert.deepEqual(events.filter(e => e.type === "retry").map(e => [e.reason, e.delayMs]), [[expected, 30000]]);
   });
   test(`HTTP ${status} retains its classification when its error body cannot be parsed`, async () => {
     for (const body of [new Response("not JSON", { status }), interruptedBody(status),

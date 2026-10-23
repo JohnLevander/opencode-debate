@@ -31,6 +31,8 @@ export function rateLimit(error: unknown): { retryAfterMs?: number } | undefined
 }
 const messageOf = (error: unknown) => error instanceof Error ? error.message : String(error);
 const snapshot = (points: Map<string, Point>) => structuredClone([...points.values()]);
+// Free-tier upstream outages outlast short waits; rate limits keep the quick doubling schedule.
+const OUTAGE_BACKOFF_MS = [5_000, 20_000];
 const validTimeout = (ms: number) => Number.isInteger(ms) && ms >= 1 && ms <= 2_147_483_647;
 
 export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
@@ -150,7 +152,9 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
         // before the deadline is neither budgeted nor logged.
         const remaining = Math.max(0, deadline - now());
         if (remaining <= 0) { live(); throw failure; }
-        const waitMs = Math.max(1000 * 2 ** budget.providerRetries++, retryAfter);
+        const backoff = unavailable ? OUTAGE_BACKOFF_MS[budget.providerRetries] : 1000 * 2 ** budget.providerRetries;
+        budget.providerRetries++;
+        const waitMs = Math.max(backoff, retryAfter);
         const scheduled = Math.min(waitMs, remaining, 2_147_483_647);
         emit({ type: "retry", turnID: turn.id, reason: unavailable ? "provider_unavailable" : "rate_limit", delayMs: scheduled });
         await delay(scheduled, overall.signal); live(); kind = unavailable ? "provider_retry" : "rate_limit_retry"; continue;
@@ -182,6 +186,7 @@ export async function runDebate(opts: DebateOptions): Promise<DebateResult> {
         turn.text = response.text; turn.reasoning = response.reasoning;
         let parsed: Reply;
         try {
+          if (!response.text.trim()) throw new Error(`Reply contained ${response.reasoning?.trim() ? "only reasoning and no final text" : "no final text"}; end the reply with the JSON object`);
           parsed = parseReply(response.text);
           // Schema-valid replies stay inspectable in the log even when the role checks below reject them.
           turn.attempts.at(-1)!.parsed = parsed;

@@ -218,3 +218,55 @@ test("[11] a second forbidden-tool interrupt in the same turn ends the debate wi
   assert.equal(result.status, "error"); assert.equal(result.answer, "Answer");
   assert.deepEqual(result.failure && { code: result.failure.code, turnID: result.failure.turnID, attempts: result.failure.attempts }, { code: "tool_violation", turnID: "C1", attempts: 2 });
 });
+
+test("[12] a reasoning-only native reply is repaired within its turn and its reasoning is kept", async t => {
+  // Overnight: GLM finished with 7k chars of reasoning and no text; the permanent transport error lost a correct debate.
+  const fake = fakeClient(); let challengerCalls = 0;
+  const original = fake.raw.session.prompt;
+  fake.raw.session.prompt = async (input: any) => {
+    const admitted = await original(input);
+    const reasoningOnly = input.sessionID === "child-1" && ++challengerCalls === 1;
+    fake.messages.get(input.sessionID)!.at(-1).content = reasoningOnly ? [{ type: "reasoning", text: "Long private trace of lastIndex advancement" }]
+      : [{ type: "text", text: input.sessionID === "child-0" ? json("[\"XX\"]") : json(null, [], true) }];
+    return admitted;
+  };
+  const adapter = new OpenCodeAdapter(fake.client, defaults(), "parent", "reasoning-only", new Set());
+  t.after(() => adapter.release());
+  const result = await runDebate({ ...options, callModel: adapter.callModel, onEvent: event => { if (event.type === "start") adapter.setAssignment(event.assignment); } });
+  assert.equal(result.status, "converged", result.reason);
+  const critique = result.turns.find(turn => turn.id === "C1")!;
+  assert.deepEqual(critique.attempts.map(a => [a.kind, a.errorCode]), [["initial", "protocol"], ["json_repair", undefined]]);
+  assert.equal(critique.attempts[0].text, ""); assert.equal(critique.attempts[0].reasoning, "Long private trace of lastIndex advancement");
+  assert.match(critique.attempts[0].error!, /only reasoning and no final text/); assert.match(critique.attempts[1].message, /only reasoning and no final text/);
+});
+test("[12] a reply with neither text nor reasoning says so instead of claiming reasoning", async () => {
+  const replies = [{ text: "" }, { text: json("Answer") }, { text: json(null, [], true) }];
+  const result = await runDebate({ ...options, callModel: async () => replies.shift()! });
+  assert.equal(result.status, "converged");
+  assert.match(result.turns[0].attempts[0].error!, /no final text/); assert.doesNotMatch(result.turns[0].attempts[0].error!, /reasoning/);
+});
+test("[13] provider outages back off for tens of seconds while rate limits keep short waits", async t => {
+  // Overnight: an upstream "Endpoint is unavailable" outage outlasted 1 s + 2 s and lost a debate with 26 minutes left.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const outage = () => new DebateError("provider_unavailable", "provider.rate-limit: Upstream request failed: Endpoint is unavailable.");
+  const events: any[] = []; let n = 0;
+  const replies: (string | Error)[] = [outage(), outage(), json("Answer"), new DebateError("rate_limit", "HTTP 429"), new DebateError("rate_limit", "HTTP 429"), json(null, [], true)];
+  const result = runDebate({ ...options, totalTimeoutMs: 120_000, callTimeoutMs: 5000, onEvent: e => events.push(e),
+    callModel: async () => { n++; const next = replies.shift()!; if (next instanceof Error) throw next; return { text: next }; } });
+  for (let i = 0; i < 120; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(500); }
+  const r = await result;
+  assert.equal(r.status, "converged"); assert.equal(n, 6);
+  assert.deepEqual(events.filter(e => e.type === "retry").map(e => [e.reason, e.delayMs]),
+    [["provider_unavailable", 5000], ["provider_unavailable", 20000], ["rate_limit", 1000], ["rate_limit", 2000]]);
+});
+test("[13] outage backoff is cut to the time left before the total deadline", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] }); // the deadline cap reads Date.now
+  const events: any[] = [];
+  const result = runDebate({ ...options, totalTimeoutMs: 8000, callTimeoutMs: 5000, onEvent: e => events.push(e),
+    callModel: async () => { throw new DebateError("provider_unavailable", "Endpoint is unavailable"); } });
+  for (let i = 0; i < 40; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(500); }
+  const r = await result;
+  assert.equal(r.status, "error"); assert.equal(r.failure?.code, "total_timeout");
+  const delays = events.filter(e => e.type === "retry").map(e => e.delayMs);
+  assert.equal(delays[0], 5000); assert.ok(delays.length === 2 && delays[1] <= 3000, JSON.stringify(delays));
+});

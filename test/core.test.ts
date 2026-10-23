@@ -223,7 +223,8 @@ test("prose cannot create IDs or leak into the next model's validated payload", 
 });
 
 async function advanceTimers(t: TestContext) {
-  for (let i = 0; i < 40; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(250); }
+  // 60 s of virtual time: enough for both outage waits (5 s, 20 s) plus calls.
+  for (let i = 0; i < 120; i++) { await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(500); }
 }
 
 test("provider outages recover with bounded backoff and typed attempts", async t => {
@@ -234,7 +235,7 @@ test("provider outages recover with bounded backoff and typed attempts", async t
   await advanceTimers(t); const r = await result;
   assert.equal(r.status, "converged"); assert.equal(r.turns[0].attempts[0].errorCode, "provider_unavailable");
   assert.equal(r.turns[0].attempts[1].kind, "provider_retry");
-  assert.deepEqual(events.filter(e => e.type === "retry").map(e => [e.reason, e.delayMs]), [["provider_unavailable", 1000]]);
+  assert.deepEqual(events.filter(e => e.type === "retry").map(e => [e.reason, e.delayMs]), [["provider_unavailable", 5000]]);
 });
 
 test("rate-limit and outage retry budgets do not reset during JSON repair", async t => {

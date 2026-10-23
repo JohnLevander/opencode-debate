@@ -45,7 +45,11 @@ test("variant is validated and passed at creation", async () => {
   config.models.glm.variant = "invalid";
   await assert.rejects(setup(config).adapter.callModel("glm", "test", new AbortController().signal), /Variant invalid/);
 });
-for (const patch of [{ onlyReasoning: true }, { finish: "length" }, { outcome: "failed" }, { modelChanged: true }]) {
+test("a reasoning-only reply returns empty text with its reasoning so the engine can repair and log it", async () => {
+  const { adapter, change } = setup(); change({ onlyReasoning: true });
+  assert.deepEqual(await adapter.callModel("glm", "test", new AbortController().signal), { text: "", reasoning: "secret reasoning" });
+});
+for (const patch of [{ finish: "length" }, { outcome: "failed" }, { modelChanged: true }]) {
   test(`rejects incomplete/error or changed-model responses: ${JSON.stringify(patch)}`, async () => {
     const { adapter, change } = setup(); change(patch);
     await assert.rejects(adapter.callModel("glm", "test", new AbortController().signal));

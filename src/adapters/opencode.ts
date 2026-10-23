@@ -150,7 +150,7 @@ export class OpenCodeAdapter implements DebateAdapter {
       if (assistant.agent !== AGENT_ID || assistant.model.id !== child.model.modelID || assistant.model.providerID !== child.model.providerID || (assistant.model.variant ?? "default") !== (child.model.variant ?? "default")) throw new DebateError("transport", "Child agent or model selection changed during debate");
       const text = assistant.content.filter(p => p.type === "text").map(p => p.text).join("\n\n");
       const reasoning = assistant.content.filter(p => p.type === "reasoning").map(p => p.text).join("\n\n");
-      if (!text.trim()) throw new DebateError("transport", "Child returned reasoning but no final text");
+      // No final text is an invalid reply, not a broken transport: the engine repairs it and logs the reasoning.
       if (signal.aborted) throw abortReason(signal);
       return { text, ...(reasoning ? { reasoning } : {}) };
     })();
